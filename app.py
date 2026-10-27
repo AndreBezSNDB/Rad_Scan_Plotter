@@ -22,6 +22,8 @@ from beamcore import (AXIS_NAMES, Scan, Settings, Unit, UPSCALE_STEPS, autofit, 
                       profile_csv, render_png)
 from store import UserStore
 
+APP_VERSION = "2026-10-27 build 7"     # shown in the sidebar so you can confirm what is deployed
+
 st.set_page_config(page_title="Beam Lab", page_icon="〰️", layout="wide", initial_sidebar_state="expanded")
 
 CMAPS = {"viridis": "Viridis", "inferno": "Inferno", "magma": "Magma", "plasma": "Plasma",
@@ -378,7 +380,45 @@ with st.sidebar:
     if USER != "local":
         st.caption(f"Signed in as {USER}")
         st.button("Sign out", on_click=st.logout, type="tertiary")
-    st.caption("Light / dark mode: ⋮ menu (top right) → Settings")
+    # Dark-mode switch. Streamlit has no Python API to change the theme, so the switch operates
+    # Streamlit's own Light/Dark item in the ⋮ menu with a tiny script (same effect, remembered per browser).
+    is_dark_now = getattr(getattr(st.context, "theme", None), "type", "light") == "dark"
+    if "dark" not in ss or (not ss.get("theme_pending") and ss.dark != is_dark_now):
+        ss.dark = is_dark_now                      # follow changes made from the ⋮ menu
+        ss.pop("dark#w", None)
+
+    def _toggle_dark():
+        ss.dark = ss["dark#w"]
+        ss.theme_pending = "Dark" if ss.dark else "Light"
+
+    st.toggle("Dark mode", value=ss.dark, key="dark#w", on_change=_toggle_dark)
+    st.caption(f"Beam Lab {APP_VERSION}")
+    if ss.get("theme_pending"):
+        want = ss.pop("theme_pending")
+        ss.theme_nonce = ss.get("theme_nonce", 0) + 1
+        st.html(f"""<span data-nonce="{ss.theme_nonce}"></span><script>
+        (function () {{
+          function pick(n) {{
+            var item = document.querySelector('[data-testid="stMainMenuItem-theme-{want}"]');
+            if (item) {{
+              item.click();
+              setTimeout(function () {{           // close Streamlit's menu again if it stayed open
+                if (document.querySelector('[data-testid="stMainMenuList"]')) {{
+                  var m = document.querySelector('[data-testid="stMainMenu"] button') ||
+                          document.querySelector('[data-testid="stMainMenu"]');
+                  if (m) m.click();
+                }}
+              }}, 150);
+              return;
+            }}
+            var menu = document.querySelector('[data-testid="stMainMenu"] button') ||
+                       document.querySelector('[data-testid="stMainMenu"]');
+            if (menu && n === 0) menu.click();
+            if (n < 30) setTimeout(function () {{ pick(n + 1); }}, 100);
+          }}
+          pick(0);
+        }})();
+        </script>""", unsafe_allow_javascript=True, width="content")
 
 if ss.get("flash"):
     st.toast(ss.pop("flash"), icon="⚠️")
@@ -565,14 +605,14 @@ def map_figure(width_hint: int):
     fig.update_layout(
         height=H, margin=dict(l=ml, r=mr, t=mt, b=mb), showlegend=False, hoverlabel=dict(font_size=12),
         xaxis=dict(range=list(he), title=xt, side="bottom", showgrid=False, zeroline=False, ticks="outside",
-                   constrain="domain", constraintoward="left"),
+                   constrain="domain", constraintoward="right"),       # spare width goes to the outer left
         xaxis2=dict(range=list(he), title=xt, side="top", overlaying="x", matches="x", showgrid=False,
                     zeroline=False, ticks="outside"),
         yaxis=dict(range=[ve[1], ve[0]] if down else list(ve), showgrid=False, zeroline=False, ticks="outside",
                    title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)",
                    domain=[(bar_px + gap_px) / P, 1], scaleanchor="x", scaleratio=1,
                    constrain="domain", constraintoward="bottom"),
-        xaxis3=dict(matches="x", anchor="y3", constrain="domain", constraintoward="left", showgrid=False,
+        xaxis3=dict(matches="x", anchor="y3", constrain="domain", constraintoward="right", showgrid=False,
                     zeroline=False, ticks="outside", tickvals=tpos, ticktext=[f"{t:g}" for t in tv],
                     title=dict(text=lab, standoff=4)),
         yaxis3=dict(domain=[0, bar_px / P], anchor="x3", showticklabels=False, ticks="", showgrid=False,
