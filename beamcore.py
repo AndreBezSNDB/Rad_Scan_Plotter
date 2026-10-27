@@ -550,7 +550,7 @@ def render_png(scan: Scan, st: Settings, r: Result, overlays: dict, cmap: str, c
     axes = [ax]
     if profile:
         axp = fig.add_axes([6.75 / W, 0.75 / H, 5.2 / W, (H - 1.9) / H])
-        wl = "slice thickness" if scan.is_yz else "beam width"
+        wl = "Beamwidth"
         pv = r.pv if r.pv is not None else r.v
         axp.plot(pv, r.widths, "o-" if len(pv) <= 60 else "-", color=T["acc"], ms=3.5, lw=1.8, label=f"{r.lvl} {wl}")
         axp.set_ylabel(f"{r.lvl} {wl} (mm)", color=T["acc"])

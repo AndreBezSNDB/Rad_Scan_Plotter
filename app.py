@@ -22,7 +22,7 @@ from beamcore import (AXIS_NAMES, Scan, Settings, Unit, UPSCALE_STEPS, autofit, 
                       profile_csv, render_png)
 from store import UserStore
 
-APP_VERSION = "2026-10-27 build 7"     # shown in the sidebar so you can confirm what is deployed
+APP_VERSION = "2026-10-27 build 8"     # shown in the sidebar so you can confirm what is deployed
 
 st.set_page_config(page_title="Beam Lab", page_icon="〰️", layout="wide", initial_sidebar_state="expanded")
 
@@ -482,6 +482,13 @@ if side is not None:
         w_number(b, sid, "gain", "Gain (dB)", format="%.1f")
         w_select(sid, "cmap", "Colormap", CMAPS)
         w_segment(sid, "up", "Upscale", UPSCALE_STEPS, format_func=lambda x: f"{x}×", required=True, width="stretch")
+        ss.setdefault("map_h", 700)
+
+        def _sync_maph():
+            ss.map_h = ss["map_h#w"]
+
+        st.segmented_control("Map size", [500, 700, 900], format_func=lambda x: {500: "S", 700: "M", 900: "L"}[x],
+                             default=ss.map_h, key="map_h#w", on_change=_sync_maph, required=True, width="stretch")
 
         st.markdown("<div class='bl-sec'>BEAM AXIS CORRECTION</div>", unsafe_allow_html=True)
         w_toggle(sid, "deskew", f"Deskew (beam axis → {scan.hname} = 0)",
@@ -531,11 +538,11 @@ if r is None:
     with main:
         st.warning("No data in the selected range.")
     st.stop()
-wl = "slice thickness" if scan.is_yz else "beam width"
+wl = "beamwidth"
 
 
 # ============================================================================ figures
-def map_figure(width_hint: int):
+def map_figure(plot_h: int):
     hu, vu = r.hu, r.vu
     lab = r.label
     if s.unit == Unit.DB:
@@ -578,7 +585,7 @@ def map_figure(width_hint: int):
     dv = (vu[1] - vu[0]) / 2 if vu.size > 1 else 0.5
     he, ve = (hu[0] - dh, hu[-1] + dh), (vu[0] - dv, vu[-1] + dv)
     down = scan.depth_is_z != tg["flip"]
-    xt = f"{r.hn} re beam axis (mm)" if s.deskew else f"{scan.hname} position (mm)"
+    xt = f"{scan.hname} position (mm)"
     # x labels on top and bottom: a second x axis that mirrors the first
     fig.add_trace(go.Scatter(x=[he[0]], y=[ve[0]], xaxis="x2", mode="markers", marker=dict(opacity=0),
                              hoverinfo="skip", showlegend=False))
@@ -599,20 +606,20 @@ def map_figure(width_hint: int):
     ml, mr, mt, mb = 62, 16, 64, 48                      # mt: top x labels; mb: bar ticks + title
     bar_px, gap_px = 14, 58                              # gap: bottom x tick labels + title above the bar
     ratio = (he[1] - he[0]) / (ve[1] - ve[0])
-    ph = min(max((width_hint - ml - mr) / ratio, 300), 900)
+    ph = plot_h                                          # map height is fixed; the plots panel slides over
     H = int(round(mt + ph + gap_px + bar_px + mb))
     P = H - mt - mb
     fig.update_layout(
         height=H, margin=dict(l=ml, r=mr, t=mt, b=mb), showlegend=False, hoverlabel=dict(font_size=12),
         xaxis=dict(range=list(he), title=xt, side="bottom", showgrid=False, zeroline=False, ticks="outside",
-                   constrain="domain", constraintoward="right"),       # spare width goes to the outer left
+                   constrain="domain", constraintoward="left"),        # map sits top-left in its zone
         xaxis2=dict(range=list(he), title=xt, side="top", overlaying="x", matches="x", showgrid=False,
                     zeroline=False, ticks="outside"),
         yaxis=dict(range=[ve[1], ve[0]] if down else list(ve), showgrid=False, zeroline=False, ticks="outside",
                    title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)",
                    domain=[(bar_px + gap_px) / P, 1], scaleanchor="x", scaleratio=1,
-                   constrain="domain", constraintoward="bottom"),
-        xaxis3=dict(matches="x", anchor="y3", constrain="domain", constraintoward="right", showgrid=False,
+                   constrain="domain", constraintoward="top"),
+        xaxis3=dict(matches="x", anchor="y3", constrain="domain", constraintoward="left", showgrid=False,
                     zeroline=False, ticks="outside", tickvals=tpos, ticktext=[f"{t:g}" for t in tv],
                     title=dict(text=lab, standoff=4)),
         yaxis3=dict(domain=[0, bar_px / P], anchor="x3", showticklabels=False, ticks="", showgrid=False,
@@ -624,7 +631,7 @@ def profile_figure(H: int):
     pf = make_subplots(specs=[[{"secondary_y": True}]])
     pv = r.pv if r.pv is not None else r.v
     mode = "lines+markers" if len(pv) <= 60 else "lines"
-    pf.add_trace(go.Scatter(x=pv, y=r.widths, mode=mode, name=f"{r.lvl} {wl}",
+    pf.add_trace(go.Scatter(x=pv, y=r.widths, mode=mode, name=f"{r.lvl} Beamwidth",
                             line=dict(color=C["acc"], width=2), marker=dict(size=5),
                             hovertemplate="%{y:.3f} mm"), secondary_y=False)
     pf.add_trace(go.Scatter(x=pv, y=r.amp, mode=mode, name=r.alab,
@@ -633,7 +640,7 @@ def profile_figure(H: int):
     pf.add_vline(x=r.fv, line=dict(color=C["mute"], dash="dot", width=1))
     pf.update_xaxes(title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)")
     wmax = np.nanmax(r.widths) if np.any(~np.isnan(r.widths)) else 1
-    pf.update_yaxes(title=dict(text=f"{r.lvl} {wl} (mm)", font=dict(color=C["acc"])), range=[0, wmax * 1.15],
+    pf.update_yaxes(title=dict(text=f"{r.lvl} Beamwidth (mm)", font=dict(color=C["acc"])), range=[0, wmax * 1.15],
                     tickfont=dict(color=C["acc"]), secondary_y=False)
     a2 = dict(title=dict(text=r.alab, font=dict(color=C["org"])), tickfont=dict(color=C["org"]), showgrid=False,
               tickmode="auto", nticks=6)
@@ -695,28 +702,46 @@ with main:
                      if lower else None)
     st.divider()
 
-    # body: beam map | plots. A slider sets the split between the two (Streamlit columns can't be dragged).
-    ss.setdefault("split", 50)
+    # body: the beam map sits on a bottom layer across the full width; the plots panel is a top layer that
+    # slides over it from the right (like a page over a page). The slider sets where that panel starts.
+    ss.setdefault("split", 55)
+    ss.setdefault("map_h", 700)
 
     def _sync_split():
         ss.split = ss["split#w"]
 
-    st.slider("Map width (%)", 25, 80, value=ss.split, step=5, key="split#w", on_change=_sync_split,
-              format="Map %d%%", label_visibility="collapsed",
-              help="Drag to share the width between the beam map and the plots")
-    c_map, c_plot = st.columns([ss.split, 100 - ss.split], gap="large")
-    main_px = 950 if ss.show_panel else 1300                # typical main-area width (sets map height)
-    half_px = int(main_px * ss.split / 100)                 # map column width estimate; sets the map height
-    with c_map:
-        st.markdown("**Beam map**" + (f"  <span style='opacity:.5;font-size:.85rem'>display {min(user_up, cap)}× "
-                                       f"+ smoothing</span>" if user_up > cap else ""), unsafe_allow_html=True)
-        fig, H = map_figure(half_px)
-        st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "toImageButtonOptions":
-                        {"filename": f"{scan.title}_map", "scale": 3}})
-    with c_plot:
-        if tg["profile"]:
-            st.markdown("**Beamwidth and Signal Strength vs depth**")
-            st.plotly_chart(profile_figure(min(max(H - 300, 360), 560)), width="stretch",
-                            config={"displaylogo": False})
-        st.markdown("**Details**")
-        st.code("\n".join(r.lines), language=None, wrap_lines=True)
+    st.slider("Plots panel position (%)", 20, 85, value=ss.split, step=1, key="split#w", on_change=_sync_split,
+              format="Plots start at %d%%", label_visibility="collapsed",
+              help="Slide the plots panel over the beam map")
+    st.html("""<script>
+      if (!window.__blBg) {           // mirror the theme background so the sliding panel always matches it
+        window.__blBg = setInterval(function () {
+          document.documentElement.style.setProperty('--bl-bg', getComputedStyle(document.body).backgroundColor);
+        }, 300);
+      }
+    </script>""", unsafe_allow_javascript=True, width="content")
+    st.markdown(f"""<style>
+      .st-key-stack {{display: grid !important; grid-template-columns: minmax(0, 1fr);}}
+      .st-key-stack > * {{grid-row: 1; grid-column: 1; min-width: 0; pointer-events: none;}}
+      .st-key-mapzone, .st-key-mapzone *, .st-key-overlay, .st-key-overlay * {{pointer-events: auto;}}
+      .st-key-overlay {{margin-left: {ss.split}%; width: calc(100% - {ss.split}%) !important; box-sizing: border-box;
+                        position: relative; z-index: 5; align-self: stretch;
+                        background: var(--bl-bg, #ffffff); padding-left: 1.4rem;
+                        border-left: 1px solid rgba(128,128,128,.28);
+                        box-shadow: -18px 0 26px -22px rgba(0,0,0,.55);}}
+    </style>""", unsafe_allow_html=True)
+
+    with st.container(key="stack"):
+        with st.container(key="mapzone"):
+            st.markdown("**Beam map**" + (f"  <span style='opacity:.5;font-size:.85rem'>display {min(user_up, cap)}× "
+                                           f"+ smoothing</span>" if user_up > cap else ""), unsafe_allow_html=True)
+            fig, H = map_figure(ss.map_h)
+            st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "toImageButtonOptions":
+                            {"filename": f"{scan.title}_map", "scale": 3}})
+        with st.container(key="overlay"):
+            if tg["profile"]:
+                st.markdown("**Beamwidth and Signal Strength vs depth**")
+                st.plotly_chart(profile_figure(min(max(H - 320, 360), 560)), width="stretch",
+                                config={"displaylogo": False})
+            st.markdown("**Details**")
+            st.code("\n".join(r.lines), language=None, wrap_lines=True)
