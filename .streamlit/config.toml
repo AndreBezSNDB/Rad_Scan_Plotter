@@ -8,7 +8,7 @@ headless = true
 gatherUsageStats = false     # don't send usage telemetry to Streamlit
 
 [client]
-toolbarMode = "minimal"      # hide developer menu items from users
+toolbarMode = "viewer"       # viewers keep print + light/dark theme; developer buttons hidden
 
 # ---------------------------------------------------------------- theme
 # Both a light and a dark theme are defined, so users can switch in

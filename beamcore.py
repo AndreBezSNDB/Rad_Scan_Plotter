@@ -465,22 +465,17 @@ def compute(scan: Scan, st: Settings, display_up: Optional[int] = None) -> Optio
     s = scan
     # short lines (≤ ~55 chars) so the details box doesn't wrap
     fmax = f"{fval_mpa:.4g} MPa" if fval_mpa is not None else f"{fval:.4g} {unit}"
-    at = f"{hn} = {fh:.2f}" + (f" ({s.hname} {fh + float(st.axis_h(fv)):.2f})" if st.deskew else "")
-    r.lines.append(f"Focal max: {fmax} [at {at}]")
-    r.lines.append(f"Beamwidth ({lvl}): {wb - wa:.3f} mm at {s.vname} = {fv:.2f}" if r.width is not None
-                   else f"Beamwidth ({lvl}): beam doesn't fall to {lvl} in range")
-    ok = ~np.isnan(widths)
-    if ok.any():
-        k = int(np.nanargmin(widths))
-        r.lines.append(f"Focal beamwidth: {widths[k]:.3f} mm at {s.vname} = {mv[k]:.2f}")
+    r.lines.append(f"Focal Depth: {fv:.2f} mm")
+    r.lines.append(f"Focal Pressure: {fmax}")
+    r.lines.append(f"Focal Beamwidth ({lvl}): {wb - wa:.3f} mm" if r.width is not None
+                   else f"Focal Beamwidth ({lvl}): doesn't fall to {lvl} in range")
     if depth:
         if depth["za"] is not None and depth["zb"] is not None:
-            r.lines.append(f"Focal depth ({lvl}): {depth['zb'] - depth['za']:.2f} mm "
+            r.lines.append(f"Focal Range ({lvl}): {depth['zb'] - depth['za']:.2f} mm "
                            f"({depth['za']:.2f} → {depth['zb']:.2f})")
         else:
-            r.lines.append(f"Focal depth ({lvl}): > {depth['zb_'] - depth['za_']:.2f} mm "
+            r.lines.append(f"Focal Range ({lvl}): > {depth['zb_'] - depth['za_']:.2f} mm "
                            f"({depth['za_']:.2f} → {depth['zb_']:.2f})")
-        r.lines.append(f"Axial peak: {s.vname} = {depth['peak']:.2f} mm")
     r.lines.append(f"Axis tilt: {st.tilt_deg:+.2f}° ({np.tan(np.radians(st.tilt_deg)) * 1e3:+.1f} µm/mm)"
                    + (" · deskewed" if st.deskew else ""))
     r.lines.append(f"Grid: {s.plane} at {AXIS_NAMES[s.fixed_ax]} = {s.fixed_val:.2f} mm"

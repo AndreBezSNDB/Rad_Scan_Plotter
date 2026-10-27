@@ -655,9 +655,18 @@ with main:
                      if lower else None)
     st.divider()
 
-    # body: beam map | plot parameters, then details across the full width
-    c_map, c_plot = st.columns(2, gap="large")
-    half_px = 480 if ss.show_panel else 700                 # typical half-column width; sets the map height
+    # body: beam map | plots. A slider sets the split between the two (Streamlit columns can't be dragged).
+    ss.setdefault("split", 50)
+
+    def _sync_split():
+        ss.split = ss["split#w"]
+
+    st.slider("Map width (%)", 25, 80, value=ss.split, step=5, key="split#w", on_change=_sync_split,
+              format="Map %d%%", label_visibility="collapsed",
+              help="Drag to share the width between the beam map and the plots")
+    c_map, c_plot = st.columns([ss.split, 100 - ss.split], gap="large")
+    main_px = 950 if ss.show_panel else 1300                # typical main-area width (sets map height)
+    half_px = int(main_px * ss.split / 100)                 # map column width estimate; sets the map height
     with c_map:
         st.markdown("**Beam map**" + (f"  <span style='opacity:.5;font-size:.85rem'>display {min(user_up, cap)}× "
                                        f"+ smoothing</span>" if user_up > cap else ""), unsafe_allow_html=True)
