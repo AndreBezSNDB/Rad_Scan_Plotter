@@ -1,0 +1,5 @@
+streamlit[auth]>=1.50
+plotly>=5.20
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8

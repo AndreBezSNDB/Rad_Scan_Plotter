@@ -1,0 +1,12 @@
+# never commit sign-in secrets
+.streamlit/secrets.toml
+
+# scan data and per-user libraries stay out of git
+*.mat
+beamlab_data/
+
+# Python / macOS clutter
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

@@ -1,0 +1,42 @@
+# Beam Lab - Streamlit configuration
+
+[server]
+maxUploadSize = 200          # MB per uploaded file
+headless = true
+
+[browser]
+gatherUsageStats = false     # don't send usage telemetry to Streamlit
+
+[client]
+toolbarMode = "minimal"      # hide developer menu items from users
+
+# ---------------------------------------------------------------- theme
+# Both a light and a dark theme are defined, so users can switch in
+# the app menu (top right) -> Settings, or follow their system setting.
+
+[theme]
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+baseRadius = "small"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#2383e2"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f7f7f5"
+textColor = "#37352f"
+borderColor = "#e9e9e7"
+
+[theme.light.sidebar]
+backgroundColor = "#f7f7f5"
+secondaryBackgroundColor = "#efefed"
+
+[theme.dark]
+primaryColor = "#529cca"
+backgroundColor = "#191919"
+secondaryBackgroundColor = "#252525"
+textColor = "#d4d4d4"
+borderColor = "#2f2f2f"
+
+[theme.dark.sidebar]
+backgroundColor = "#202020"
+secondaryBackgroundColor = "#2c2c2c"
