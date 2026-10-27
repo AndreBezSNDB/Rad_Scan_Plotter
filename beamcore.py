@@ -325,9 +325,9 @@ def display(lin, st: Settings):
         norm = lin / ref
     if st.unit == Unit.DB:
         return norm, 20 * np.log10(np.clip(norm, 10 ** (DB_FLOOR / 20), None)), \
-            "dB re depth max" if st.depthnorm else "dB re max"
+            "dB re lateral max" if st.depthnorm else "dB re max"
     if st.unit == Unit.NORM or st.depthnorm:
-        return norm, norm, "Normalized per depth" if st.depthnorm else "Normalized (linear)"
+        return norm, norm, "Laterally normalized" if st.depthnorm else "Normalized (linear)"
     return norm, lin, st.unit
 
 

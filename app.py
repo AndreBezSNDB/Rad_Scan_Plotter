@@ -10,8 +10,8 @@ Sign-in is optional: configure [auth] in .streamlit/secrets.toml to require it (
 """
 from __future__ import annotations
 
+import json
 import os
-from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
@@ -26,25 +26,28 @@ st.set_page_config(page_title="Beam Lab", page_icon="〰️", layout="wide", ini
 
 CMAPS = {"viridis": "Viridis", "inferno": "Inferno", "magma": "Magma", "plasma": "Plasma",
          "cividis": "Cividis", "turbo": "Turbo", "jet": "Jet", "gray": "Greys_r"}
-TOGGLES = dict(target=True, contour=True, width=True, depth=False, depthnorm=False, flip=False, top=True,
-               equal=True, profile=True, deskew=False)
+TOGGLES = dict(target=True, contour=True, width=True, depth=False, depthnorm=False, flip=True,
+               profile=True, deskew=False)
+MAP_CELLS_MAX = 60_000            # cap on heat-map cells sent to the browser (speed); export uses full upscale
 ss = st.session_state
 
 st.markdown("""
 <style>
-.block-container {padding-top: 1.4rem; padding-bottom: 1.5rem; max-width: 100%;}
+.block-container {padding-top: 3.2rem; padding-bottom: 1.5rem; max-width: 100%;}
 section[data-testid="stSidebar"] .stButton button, section[data-testid="stSidebar"] .stButton button > div
     {justify-content: flex-start; text-align: left; width: 100%;}
 section[data-testid="stSidebar"] .stButton button p {white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
 .bl-crumb {opacity: .6; font-size: .9rem; margin-bottom: .2rem;}
 .bl-props {border-collapse: collapse; margin: .2rem 0 .4rem 0; font-size: .93rem;}
 .bl-props td {padding: 3px 28px 3px 0; border: none;}
-.bl-props td.k {opacity: .6;}
+.bl-props td.k {opacity: .6; white-space: nowrap;}
+.bl-props td {word-break: break-word;}
 .bl-props tr, .bl-props table {border: none; background: transparent !important;}
 .bl-chip {background: rgba(128,128,128,.16); border-radius: 4px; padding: 1px 7px; margin-right: 6px; font-size: .86rem;}
 .bl-sec {opacity: .55; font-size: .78rem; font-weight: 600; margin: .9rem 0 .2rem 0; letter-spacing: .02em;}
 .bl-empty {text-align: center; padding: 14vh 0 2rem 0; opacity: .8;}
-div[data-testid="stMetricValue"] {font-size: 1.55rem;}
+div[data-testid="stMetricValue"] {font-size: 1.5rem;}
+.bl-sum-title {font-weight: 600; margin: .1rem 0 .4rem 0;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -153,6 +156,42 @@ def reset_widget(stored_key: str, value) -> None:
     ss.pop(stored_key + "#w", None)
 
 
+# Settings live in plain session-state keys (they survive when the settings panel is hidden);
+# each widget gets its own "#w" key and copies its value back on change.
+def _sync(stored_key: str):
+    def f():
+        ss[stored_key] = ss[stored_key + "#w"]
+    return f
+
+
+def w_toggle(sid, name, label, **kw):
+    k = K(sid, name)
+    return st.toggle(label, value=bool(ss[k]), key=k + "#w", on_change=_sync(k), **kw)
+
+
+def w_number(container, sid, name, label, **kw):
+    k = K(sid, name)
+    return container.number_input(label, value=float(ss[k]), key=k + "#w", on_change=_sync(k), **kw)
+
+
+def w_select(sid, name, label, options, **kw):
+    k = K(sid, name)
+    opts_ = list(options)
+    idx = opts_.index(ss[k]) if ss[k] in opts_ else 0
+    return st.selectbox(label, opts_, index=idx, key=k + "#w", on_change=_sync(k), **kw)
+
+
+def w_segment(sid, name, label, options, **kw):
+    k = K(sid, name)
+    return st.segmented_control(label, options, default=ss[k], key=k + "#w", on_change=_sync(k), **kw)
+
+
+def drop_widgets(sid: str) -> None:
+    """Forget widget state for a scan so widgets re-read the stored settings (after programmatic changes)."""
+    for key in [x for x in ss.keys() if str(x).startswith(sid + ".") and str(x).endswith("#w")]:
+        del ss[key]
+
+
 def clim_key(sid: str, scan: Scan, s: Settings):
     lo, hi = colour_bounds(scan, s)
     return K(sid, f"clim:{lo:.6g}:{hi:.6g}"), lo, hi
@@ -170,6 +209,7 @@ def cb_autofit(sid: str) -> None:
         va, vb, xa, xb = autofit(scan, settings_from_state(sid, scan))
         ss[K(sid, "va")], ss[K(sid, "vb")] = va, vb
         ss[K(sid, "xa")], ss[K(sid, "xb")] = round(xa, 4), round(xb, 4)
+        drop_widgets(sid)
 
 
 def cb_reset_ranges(sid: str) -> None:
@@ -264,6 +304,7 @@ def cb_apply_view(vid: str) -> None:
         a, b = d["clim"]
         a, b = min(max(a, lo), hi), min(max(b, lo), hi)
         reset_widget(ck, (a, b) if b > a else (lo, hi))
+    drop_widgets(sid)
 
 
 # ============================================================================ sidebar
@@ -274,7 +315,7 @@ if ss.scan_id and not store.scan(ss.scan_id):
     ss.scan_id = store.scans[0]["id"] if store.scans else None
 
 with st.sidebar:
-    st.markdown("### 〰 Beam Lab")
+    st.markdown("### Beam Lab")
     ups = st.file_uploader("Import .mat scans", type=["mat"], accept_multiple_files=True,
                            key=f"uploader_{ss.up_n}", label_visibility="collapsed")
     if ups:
@@ -356,52 +397,61 @@ dark = getattr(getattr(st.context, "theme", None), "type", "light") == "dark"
 C = dict(red="#ff7369" if dark else "#e03e3e", org="#ffa344" if dark else "#d9730d",
          acc="#529cca" if dark else "#2383e2", axis="#4cd7ff" if dark else "#00a3bf",
          mute="#9b9b9b" if dark else "#787774")
+entry = store.scan(sid)
+spath = store.scan_path(sid)
+SKEY = (str(spath), spath.stat().st_mtime, entry.get("filename", ""))   # cache key for this scan
 
-# ============================================================================ header
-top_l, top_r = st.columns([3, 2], vertical_alignment="center")
-top_l.markdown(f"<div class='bl-crumb'>Scans / {scan.title}</div>", unsafe_allow_html=True)
-with top_r.container(horizontal=True, horizontal_alignment="right"):
-    with st.popover("Save view", type="tertiary"):
-        st.text_input("View name", key="new_view_name", placeholder=f"{scan.title} – elevation focus")
-        st.button("Save", type="primary", on_click=cb_save_view, args=(sid,), use_container_width=True)
-    export_slot = st.empty()
-    csv_slot = st.empty()
-    show_panel = st.toggle("View settings", value=True, key="show_panel")
 
-st.markdown(f"# {scan.title}")
-fixed = AXIS_NAMES[scan.fixed_ax]
-props = [("◎ Plane", f"<span class='bl-chip'>{scan.plane}</span>at {fixed} = {scan.fixed_val:.2f} mm"),
-         ("∿ Frequency", f"{scan.freq:g} MHz" if scan.freq is not None else "—"),
-         ("▦ Grid", f"Δ{scan.hname} {scan.dh:.3g} mm · Δ{scan.vname} {scan.dv:.3g} mm · {len(scan.h)} × {len(scan.v)}"),
-         ("◉ Hydrophone", f"{scan.sens:g} mV/MPa · {scan.gain:g} dB gain"
-                          + (f" · {scan.navg} averages" if scan.navg else "")),
-         ("▣ Source", f"<span style='opacity:.6'>{store.scan(sid).get('filename', '')}</span>")]
-st.markdown("<table class='bl-props'>" + "".join(f"<tr><td class='k'>{k}</td><td>{v}</td></tr>" for k, v in props)
-            + "</table>", unsafe_allow_html=True)
-st.divider()
+@st.cache_data(show_spinner=False, max_entries=64)
+def cached_compute(path: str, mtime: float, filename: str, settings_json: str):
+    return compute(load_scan(path, mtime, filename), Settings.from_dict(json.loads(settings_json)))
 
-if show_panel:
-    col_map, col_info, col_set = st.columns([1.25, 1.1, 0.8], gap="large")
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def cached_bounds(path: str, mtime: float, filename: str, settings_json: str):
+    return colour_bounds(load_scan(path, mtime, filename), Settings.from_dict(json.loads(settings_json)))
+
+
+def sjson(st_: Settings) -> str:
+    return json.dumps(st_.as_dict(), sort_keys=True)
+
+
+def clim_key_fast(st_: Settings):
+    lo, hi = cached_bounds(*SKEY, sjson(st_))
+    return K(sid, f"clim:{lo:.6g}:{hi:.6g}"), lo, hi
+
+
+ss.setdefault("show_panel", True)
+lvl_txt = f"{ss[K(sid, 'level')] if ss[K(sid, 'level')] < 0 else -3.0:g} dB"
+if ss.show_panel:
+    main, side = st.columns([3.3, 1], gap="large")
 else:
-    col_map, col_info = st.columns([1.0, 1.4], gap="large")
-    col_set = None
+    main, side = st.container(), None
 
-# ============================================================================ settings panel
+# ============================================================================ settings panel (full height, right)
 s0 = settings_from_state(sid, scan)
-ck, c_lo, c_hi = clim_key(sid, scan, s0)
+ck, c_lo, c_hi = clim_key_fast(s0)
 
-
-def settings_panel(box):
-    with box:
+if side is not None:
+    with side:
         st.markdown("**View settings**")
         st.markdown("<div class='bl-sec'>SCALE</div>", unsafe_allow_html=True)
-        st.selectbox("Scale", scan.units(), key=K(sid, "unit"), label_visibility="collapsed")
+        w_select(sid, "unit", "Scale", scan.units(), label_visibility="collapsed")
         a, b = st.columns(2)
-        a.number_input("Sensitivity (mV/MPa)", min_value=0.001, format="%.2f", key=K(sid, "sens"))
-        b.number_input("Gain (dB)", format="%.1f", key=K(sid, "gain"))
-        st.selectbox("Colormap", list(CMAPS), key=K(sid, "cmap"))
-        st.segmented_control("Upscale", UPSCALE_STEPS, format_func=lambda x: f"{x}×", key=K(sid, "up"),
-                             required=True, width="stretch")
+        w_number(a, sid, "sens", "Sensitivity (mV/MPa)", min_value=0.001, format="%.2f")
+        w_number(b, sid, "gain", "Gain (dB)", format="%.1f")
+        w_select(sid, "cmap", "Colormap", CMAPS)
+        w_segment(sid, "up", "Upscale", UPSCALE_STEPS, format_func=lambda x: f"{x}×", required=True, width="stretch")
+
+        st.markdown("<div class='bl-sec'>BEAM AXIS CORRECTION</div>", unsafe_allow_html=True)
+        w_toggle(sid, "deskew", f"Deskew (beam axis → {scan.hname} = 0)",
+                  help=f"Fitted tilt {s0.tilt_deg:+.2f}°. Shifts each depth row so the beam axis sits at "
+                       f"{scan.hname} = 0 (a shear, not a rotation). Turn off to see the raw data.")
+        a, b = st.columns(2)
+        w_number(a, sid, "xa", f"{scan.hname} at {scan.vname} {ss[K(sid, 'va')]:.2f}", step=0.01, format="%.3f")
+        w_number(b, sid, "xb", f"{scan.hname} at {scan.vname} {ss[K(sid, 'vb')]:.2f}", step=0.01, format="%.3f")
+        st.button(f"Auto-fit axis  (tilt {s0.tilt_deg:+.2f}°)", on_click=cb_autofit, args=(sid,),
+                  use_container_width=True)
 
         st.markdown("<div class='bl-sec'>RANGES</div>", unsafe_allow_html=True)
         range_widget(st.select_slider, K(sid, "hr"), f"{scan.hname} range (mm)", options=opts(scan.h),
@@ -417,155 +467,184 @@ def settings_panel(box):
         b.button("Reset ranges", on_click=cb_reset_ranges, args=(sid,), type="tertiary")
 
         st.markdown("<div class='bl-sec'>OVERLAYS</div>", unsafe_allow_html=True)
-        for k, label in (("target", "Focal target"), ("contour", "dB boundary"), ("width", "Focal width"),
-                         ("depth", "Focal depth (along axis)"), ("depthnorm", "Normalize by depth"),
-                         ("flip", "Flip vertical axis"), ("top", "Axis labels on top"),
-                         ("equal", "Equal axis scaling"), ("profile", "Depth profile")):
-            st.toggle(label, key=K(sid, k))
-        st.number_input("Level (dB) — boundary, width & depth", step=0.5, format="%.1f", key=K(sid, "level"),
+        for k, label in (("target", "Focal target"), ("contour", f"dB boundary ({lvl_txt})"),
+                         ("width", f"Focal width ({lvl_txt})"), ("depth", f"Focal depth along axis ({lvl_txt})"),
+                         ("depthnorm", "Lateral normalization"), ("flip", "Flip vertical axis (low at bottom)"),
+                         ("profile", "Plot parameters")):
+            w_toggle(sid, k, label)
+        w_number(st, sid, "level", "Level (dB) — boundary, width & depth", step=0.5, format="%.1f",
                         help="Negative dB relative to the peak (−3 dB = 0.708 × pressure). Positive values fall back to −3.")
 
-        st.markdown("<div class='bl-sec'>BEAM AXIS</div>", unsafe_allow_html=True)
-        a, b = st.columns(2)
-        a.number_input(f"{scan.hname} at {scan.vname} {ss[K(sid, 'va')]:.2f}", step=0.01, format="%.3f",
-                       key=K(sid, "xa"))
-        b.number_input(f"{scan.hname} at {scan.vname} {ss[K(sid, 'vb')]:.2f}", step=0.01, format="%.3f",
-                       key=K(sid, "xb"))
-        st.toggle(f"Deskew to {scan.hname} = 0", key=K(sid, "deskew"), help=f"Tilt {s0.tilt_deg:+.2f}°. "
-                  "Shifts each depth row so the beam axis sits at 0 (a shear, not a rotation).")
-        st.button("Auto-fit axis", on_click=cb_autofit, args=(sid,), use_container_width=True)
-
-
-if col_set is not None:
-    settings_panel(col_set)
-
-# ============================================================================ compute
+# ============================================================================ compute (cached)
 s = settings_from_state(sid, scan)
 tg = {k: bool(ss.get(K(sid, k), v)) for k, v in TOGGLES.items()}
-ck, c_lo, c_hi = clim_key(sid, scan, s)
+ck, c_lo, c_hi = clim_key_fast(s)
 clim = ss.get(ck, (c_lo, c_hi))
-r = compute(scan, s)
+user_up = s.upscale
+cells = len(scan.h) * len(scan.v)
+cap = max([f for f in UPSCALE_STEPS if cells * f * f <= MAP_CELLS_MAX] or [1])
+s_disp = Settings.from_dict({**s.as_dict(), "upscale": min(user_up, cap)})
+r = cached_compute(*SKEY, sjson(s_disp))
 if r is None:
-    st.warning("No data in the selected range.")
+    with main:
+        st.warning("No data in the selected range.")
     st.stop()
+wl = "slice thickness" if scan.is_yz else "beam width"
 
-# ============================================================================ beam map
-def map_figure():
+
+# ============================================================================ figures
+def map_figure(height_hint: int):
     hu, vu = r.hu, r.vu
     lab = r.label
-    dunit = "dB" if s.unit == Unit.DB else ("" if lab.startswith("Normalized") else r.unit)
+    if s.unit == Unit.DB:
+        dunit = "dB"
+    elif s.unit == Unit.NORM or s.depthnorm:
+        dunit = ""
+    else:
+        dunit = r.unit
     extra = "" if dunit == r.unit else f"  (%{{customdata:.4g}} {r.unit})"
     fig = go.Figure(go.Heatmap(
         x=hu, y=vu, z=r.dispu, customdata=r.linu, colorscale=CMAPS[ss[K(sid, "cmap")]],
-        zmin=clim[0], zmax=clim[1], zsmooth=False,
-        colorbar=dict(title=dict(text=lab, side="right"), thickness=12, outlinewidth=0),
+        zmin=clim[0], zmax=clim[1], zsmooth="best" if user_up > 1 else False,
+        colorbar=dict(title=dict(text=lab, side="right"), thickness=12, outlinewidth=0, x=1.0, xpad=14),
         hovertemplate=f"{r.hn} %{{x:.3f}} mm · {scan.vname} %{{y:.3f}} mm<br><b>%{{z:.4g}} {dunit}</b>{extra}<extra></extra>"))
     v = r.v
     if tg["contour"] and r.normu.shape[0] > 1 and r.normu.shape[1] > 1:
         fig.add_trace(go.Contour(x=hu, y=vu, z=r.normu, showscale=False, hoverinfo="skip",
                                  contours=dict(start=r.frac, end=r.frac, size=1, coloring="none"),
-                                 line=dict(color="white", dash="dash", width=1.3), name=f"{r.lvl} boundary"))
+                                 line=dict(color="white", dash="dash", width=1.3, smoothing=1.0)))
     if tg["depth"] and r.depth:
         d = r.depth
         fig.add_trace(go.Scatter(x=list(r.ax_x), y=[v[0], v[-1]], mode="lines", hoverinfo="skip",
-                                 line=dict(color=C["axis"], width=1), name="beam axis"))
+                                 line=dict(color=C["axis"], width=1)))
         fig.add_trace(go.Scatter(x=[d["xa"], d["xb"]], y=[d["za_"], d["zb_"]], mode="lines",
-                                 line=dict(color=C["red"], width=4), name=f"{r.lvl} depth of field",
+                                 line=dict(color=C["red"], width=4),
                                  hovertemplate=f"{r.lvl} depth of field<extra></extra>"))
     if tg["width"]:
         fig.add_hline(y=r.fv, line=dict(color="white", width=1), opacity=0.7)
         if r.width is not None:
             fig.add_trace(go.Scatter(x=[r.wa, r.wb], y=[r.fv, r.fv], mode="lines+markers",
                                      marker=dict(symbol="line-ns", size=12, line=dict(width=2, color=C["red"])),
-                                     line=dict(color=C["red"], width=4), name=f"{r.lvl} width",
+                                     line=dict(color=C["red"], width=4),
                                      hovertemplate=f"{r.lvl} width {r.width:.3f} mm<extra></extra>"))
     if tg["target"]:
-        fig.add_trace(go.Scatter(x=[r.fh], y=[r.fv], mode="markers", name="focal max",
+        fig.add_trace(go.Scatter(x=[r.fh], y=[r.fv], mode="markers",
                                  marker=dict(symbol="circle-cross-open", size=16, line=dict(width=2, color=C["org"])),
                                  hovertemplate=f"Focal max<br>{r.hn} {r.fh:.2f} · {scan.vname} {r.fv:.2f} mm<br>"
                                                f"{r.fval:.4g} {r.unit}<extra></extra>"))
-    he = (hu[0] - (hu[1] - hu[0]) / 2, hu[-1] + (hu[1] - hu[0]) / 2) if hu.size > 1 else (hu[0] - .5, hu[0] + .5)
-    ve = (vu[0] - (vu[1] - vu[0]) / 2, vu[-1] + (vu[1] - vu[0]) / 2) if vu.size > 1 else (vu[0] - .5, vu[0] + .5)
+    dh = (hu[1] - hu[0]) / 2 if hu.size > 1 else 0.5
+    dv = (vu[1] - vu[0]) / 2 if vu.size > 1 else 0.5
+    he, ve = (hu[0] - dh, hu[-1] + dh), (vu[0] - dv, vu[-1] + dv)
     down = scan.depth_is_z != tg["flip"]
-    xaxis = dict(range=list(he), title=f"{r.hn} re beam axis (mm)" if s.deskew else f"{scan.hname} position (mm)",
-                 side="top" if tg["top"] else "bottom", showgrid=False, zeroline=False,
-                 constrain="domain", constraintoward="left")
-    yaxis = dict(range=[ve[1], ve[0]] if down else list(ve), showgrid=False, zeroline=False,
-                 title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)",
-                 constrain="domain", constraintoward="top")
-    ml, mr = 62, 92                                   # left labels; right = colourbar + its label
-    mt, mb = (72, 16) if tg["top"] else (16, 62)
-    if tg["equal"]:
-        # size the figure so the plot area has exactly the data's aspect ratio
-        yaxis.update(scaleanchor="x", scaleratio=1)
-        ratio = (he[1] - he[0]) / (ve[1] - ve[0])
-        pw = 245 if show_panel else 380
-        ph = pw / ratio
-        if ph > 620:
-            ph, pw = 620, 620 * ratio
-        if ph < 240:
-            ph, pw = 240, 240 * ratio
-        W, H = int(pw + ml + mr), int(ph + mt + mb)
-    else:
-        W, H = None, 640
-    fig.update_layout(height=H, width=W, margin=dict(l=ml, r=mr, t=mt, b=mb),
-                      xaxis=xaxis, yaxis=yaxis, showlegend=False, hoverlabel=dict(font_size=12))
-    return fig, W
+    xt = f"{r.hn} re beam axis (mm)" if s.deskew else f"{scan.hname} position (mm)"
+    # x labels on top and bottom: a second x axis that mirrors the first
+    fig.add_trace(go.Scatter(x=[he[0]], y=[ve[0]], xaxis="x2", mode="markers", marker=dict(opacity=0),
+                             hoverinfo="skip", showlegend=False))
+    ml, mr, mt, mb = 62, 118, 64, 58
+    ratio = (he[1] - he[0]) / (ve[1] - ve[0])
+    H = int(min(max((height_hint - ml - mr) / ratio + mt + mb, 420), 960))
+    fig.update_layout(
+        height=H, margin=dict(l=ml, r=mr, t=mt, b=mb), showlegend=False, hoverlabel=dict(font_size=12),
+        xaxis=dict(range=list(he), title=xt, side="bottom", showgrid=False, zeroline=False,
+                   constrain="domain", constraintoward="left", ticks="outside"),
+        xaxis2=dict(range=list(he), title=xt, side="top", overlaying="x", matches="x", showgrid=False,
+                    zeroline=False, ticks="outside"),
+        yaxis=dict(range=[ve[1], ve[0]] if down else list(ve), showgrid=False, zeroline=False,
+                   title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)",
+                   scaleanchor="x", scaleratio=1, constrain="domain", constraintoward="top", ticks="outside"))
+    return fig, H
 
 
-with col_map:
-    st.markdown("**Beam map**")
-    fig, W = map_figure()
-    st.plotly_chart(fig, width=W or "stretch", config={"displaylogo": False, "toImageButtonOptions":
-                    {"filename": f"{scan.title}_map", "scale": 3}})
+def profile_figure(H: int):
+    pf = make_subplots(specs=[[{"secondary_y": True}]])
+    pf.add_trace(go.Scatter(x=r.v, y=r.widths, mode="lines+markers", name=f"{r.lvl} {wl}",
+                            line=dict(color=C["acc"], width=2), marker=dict(size=5),
+                            hovertemplate="%{y:.3f} mm"), secondary_y=False)
+    pf.add_trace(go.Scatter(x=r.v, y=r.amp, mode="lines+markers", name=r.alab,
+                            line=dict(color=C["org"], width=2), marker=dict(size=5, symbol="square"),
+                            hovertemplate="%{y:.4g}"), secondary_y=True)
+    pf.add_vline(x=r.fv, line=dict(color=C["mute"], dash="dot", width=1))
+    pf.update_xaxes(title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)")
+    wmax = np.nanmax(r.widths) if np.any(~np.isnan(r.widths)) else 1
+    pf.update_yaxes(title=dict(text=f"{r.lvl} {wl} (mm)", font=dict(color=C["acc"])), range=[0, wmax * 1.15],
+                    tickfont=dict(color=C["acc"]), secondary_y=False)
+    a2 = dict(title=dict(text=r.alab, font=dict(color=C["org"])), tickfont=dict(color=C["org"]), showgrid=False,
+              tickmode="auto", nticks=6)
+    if s.unit != Unit.DB and np.any(~np.isnan(r.amp)) and np.nanmax(r.amp) > 0:
+        a2["range"] = [0, float(np.nanmax(r.amp)) * 1.12]
+    pf.update_yaxes(**a2, secondary_y=True)
+    pf.update_layout(height=H, margin=dict(l=10, r=10, t=64, b=58), hovermode="x unified",
+                     legend=dict(orientation="h", y=1.1, x=0, bgcolor="rgba(0,0,0,0)"))
+    return pf
 
-# ============================================================================ summary + profile + details
-with col_info:
-    st.markdown("**Summary**")
-    wl = "slice thickness" if scan.is_yz else "beam width"
-    with st.container(border=True):
-        a, b = st.columns(2)
-        if s.unit in (Unit.PPOS, Unit.PNEG):
-            a.metric("Focal p+" if s.unit == Unit.PPOS else "Focal p−", f"{r.fval:.3g} MPa")
+
+def export_png() -> bytes:
+    rf = cached_compute(*SKEY, sjson(s))                     # full requested upscale for the export
+    return render_png(scan, s, rf, {**tg, "top": True}, ss[K(sid, "cmap")], clim, dark=dark, profile=tg["profile"])
+
+
+# ============================================================================ main column
+with main:
+    # top bar
+    top_l, top_r = st.columns([2, 3], vertical_alignment="center")
+    top_l.markdown(f"<div class='bl-crumb'>Scans / {scan.title}</div>", unsafe_allow_html=True)
+    with top_r.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
+        with st.popover("Save view", type="tertiary"):
+            st.text_input("View name", key="new_view_name", placeholder=f"{scan.title} – elevation focus")
+            st.button("Save", type="primary", on_click=cb_save_view, args=(sid,), use_container_width=True)
+        st.download_button("Export PNG", type="tertiary", file_name=f"{scan.title}_beam.png", mime="image/png",
+                           data=export_png)
+        st.download_button("Profile CSV", type="tertiary", file_name=f"{scan.title}_profile.csv",
+                           mime="text/csv", data=profile_csv(scan, r))
+        st.toggle("View settings", key="show_panel")
+
+    # header: scan info (left) | summary (right)
+    h_left, h_right = st.columns([1.1, 1], gap="large")
+    with h_left:
+        st.markdown(f"# {scan.title}")
+        fixed = AXIS_NAMES[scan.fixed_ax]
+        props = [("◎ Plane", f"<span class='bl-chip'>{scan.plane}</span>at {fixed} = {scan.fixed_val:.2f} mm"),
+                 ("∿ Frequency", f"{scan.freq:g} MHz" if scan.freq is not None else "—"),
+                 ("▦ Grid", f"Δ{scan.hname} {scan.dh:.3g} mm · Δ{scan.vname} {scan.dv:.3g} mm · "
+                            f"{len(scan.h)} × {len(scan.v)}"),
+                 ("◉ Hydrophone", f"{scan.sens:g} mV/MPa · {scan.gain:g} dB gain"
+                                  + (f" · {scan.navg} averages" if scan.navg else "")),
+                 ("▣ Source", f"<span style='opacity:.6'>{entry.get('filename', '')}</span>")]
+        st.markdown("<table class='bl-props'>" + "".join(f"<tr><td class='k'>{k}</td><td>{v}</td></tr>"
+                                                          for k, v in props) + "</table>", unsafe_allow_html=True)
+    with h_right:
+        st.markdown("<div class='bl-sum-title'>Summary</div>", unsafe_allow_html=True)
+        with st.container(border=True):
+            a, b = st.columns(2)
+            if s.unit in (Unit.PPOS, Unit.PNEG):
+                a.metric("Focal p+" if s.unit == Unit.PPOS else "Focal p−", f"{r.fval:.3g} MPa")
+            else:
+                a.metric("Focal pressure (p–p)", f"{r.fval_mpa:.3g} MPa" if r.fval_mpa is not None else "—")
+            b.metric(f"Focal depth · {r.hn} {r.fh:.2f}", f"{r.fv:.2f} mm")
+            a, b = st.columns(2)
+            a.metric(f"{r.lvl} {wl}", f"{r.width:.3f} mm" if r.width is not None else "—")
+            dof, lower = r.dof
+            b.metric(f"{r.lvl} depth of field", "—" if dof is None else f"{'> ' if lower else ''}{dof:.2f} mm",
+                     help="Still above the level at the edge of the selected depth range — scan deeper to close it."
+                     if lower else None)
+    st.divider()
+
+    # body: beam map | plot parameters, then details across the full width
+    c_map, c_plot = st.columns(2, gap="large")
+    half_px = 600 if ss.show_panel else 820                 # approx. half-column width, used for the aspect
+    with c_map:
+        st.markdown("**Beam map**" + (f"  <span style='opacity:.5;font-size:.85rem'>display {min(user_up, cap)}× "
+                                       f"+ smoothing</span>" if user_up > cap else ""), unsafe_allow_html=True)
+        fig, H = map_figure(half_px)
+        st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "toImageButtonOptions":
+                        {"filename": f"{scan.title}_map", "scale": 3}})
+    with c_plot:
+        if tg["profile"]:
+            st.markdown(f"**{'Thickness' if scan.is_yz else 'Width'} & on-axis signal vs depth**")
+            st.plotly_chart(profile_figure(min(H, 620)), width="stretch", config={"displaylogo": False})
         else:
-            a.metric("Focal pressure (p–p)", f"{r.fval_mpa:.3g} MPa" if r.fval_mpa is not None else "—")
-        b.metric(f"Focal depth · {r.hn} {r.fh:.2f}", f"{r.fv:.2f} mm")
-        a, b = st.columns(2)
-        a.metric(f"{r.lvl} {wl}", f"{r.width:.3f} mm" if r.width is not None else "—")
-        dof, lower = r.dof
-        b.metric(f"{r.lvl} depth of field", "—" if dof is None else f"{'> ' if lower else ''}{dof:.2f} mm",
-                 help="Still above the level at the edge of the selected depth range — scan deeper to close it."
-                 if lower else None)
-
+            st.markdown("**Details**")
+            st.code("\n".join(r.lines), language=None, wrap_lines=True)
     if tg["profile"]:
-        st.markdown(f"**{'Thickness' if scan.is_yz else 'Width'} & on-axis signal vs depth**")
-        pf = make_subplots(specs=[[{"secondary_y": True}]])
-        pf.add_trace(go.Scatter(x=r.v, y=r.widths, mode="lines+markers", name=f"{r.lvl} {wl}",
-                                line=dict(color=C["acc"], width=2), marker=dict(size=5),
-                                hovertemplate="%{y:.3f} mm"), secondary_y=False)
-        pf.add_trace(go.Scatter(x=r.v, y=r.amp, mode="lines+markers", name=r.alab,
-                                line=dict(color=C["org"], width=2), marker=dict(size=5, symbol="square"),
-                                hovertemplate="%{y:.4g}"), secondary_y=True)
-        pf.add_vline(x=r.fv, line=dict(color=C["mute"], dash="dot", width=1))
-        pf.update_xaxes(title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)")
-        wmax = np.nanmax(r.widths) if np.any(~np.isnan(r.widths)) else 1
-        pf.update_yaxes(title=dict(text=f"{r.lvl} {wl} (mm)", font=dict(color=C["acc"])), range=[0, wmax * 1.15],
-                        tickfont=dict(color=C["acc"]), secondary_y=False)
-        a2 = dict(title=dict(text=r.alab, font=dict(color=C["org"])), tickfont=dict(color=C["org"]), showgrid=False,
-                  tickmode="auto", nticks=6)
-        if s.unit != Unit.DB and np.any(~np.isnan(r.amp)) and np.nanmax(r.amp) > 0:
-            a2["range"] = [0, float(np.nanmax(r.amp)) * 1.12]
-        pf.update_yaxes(**a2, secondary_y=True)
-        pf.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), hovermode="x unified",
-                         legend=dict(orientation="h", y=1.08, x=0, bgcolor="rgba(0,0,0,0)"))
-        st.plotly_chart(pf, width="stretch", config={"displaylogo": False})
-
-    st.markdown("**Details**")
-    st.code("\n".join(r.lines), language=None, wrap_lines=True)
-
-# ============================================================================ exports (top bar)
-export_slot.download_button(
-    "Export PNG", type="tertiary", file_name=f"{scan.title}_beam.png", mime="image/png",
-    data=lambda: render_png(scan, s, r, tg, ss[K(sid, "cmap")], clim, dark=dark, profile=tg["profile"]))
-csv_slot.download_button("Profile CSV", type="tertiary", file_name=f"{scan.title}_profile.csv", mime="text/csv",
-                         data=profile_csv(scan, r))
+        st.markdown("**Details**")
+        st.code("\n".join(r.lines), language=None, wrap_lines=True)
