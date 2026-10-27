@@ -403,8 +403,8 @@ SKEY = (str(spath), spath.stat().st_mtime, entry.get("filename", ""))   # cache 
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def cached_compute(path: str, mtime: float, filename: str, settings_json: str):
-    return compute(load_scan(path, mtime, filename), Settings.from_dict(json.loads(settings_json)))
+def cached_compute(path: str, mtime: float, filename: str, settings_json: str, display_up: int | None = None):
+    return compute(load_scan(path, mtime, filename), Settings.from_dict(json.loads(settings_json)), display_up)
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
@@ -454,6 +454,8 @@ if side is not None:
                   use_container_width=True)
 
         st.markdown("<div class='bl-sec'>RANGES</div>", unsafe_allow_html=True)
+        rng = st.container(gap=None)
+        rng.__enter__()
         range_widget(st.select_slider, K(sid, "hr"), f"{scan.hname} range (mm)", options=opts(scan.h),
                      format_func=lambda x: f"{x:.2f}")
         range_widget(st.select_slider, K(sid, "vr"), f"{scan.vname} range (mm)", options=opts(scan.v),
@@ -465,10 +467,11 @@ if side is not None:
         a, b = st.columns(2)
         a.button("Auto colour", on_click=cb_auto_colour, args=(ck,), type="tertiary")
         b.button("Reset ranges", on_click=cb_reset_ranges, args=(sid,), type="tertiary")
+        rng.__exit__(None, None, None)
 
         st.markdown("<div class='bl-sec'>OVERLAYS</div>", unsafe_allow_html=True)
         for k, label in (("target", "Focal target"), ("contour", f"dB boundary ({lvl_txt})"),
-                         ("width", f"Focal width ({lvl_txt})"), ("depth", f"Focal depth along axis ({lvl_txt})"),
+                         ("width", f"Focal width ({lvl_txt})"), ("depth", f"Plot focal depth axis ({lvl_txt})"),
                          ("depthnorm", "Lateral normalization"), ("flip", "Flip vertical axis (low at bottom)"),
                          ("profile", "Plot parameters")):
             w_toggle(sid, k, label)
@@ -483,8 +486,7 @@ clim = ss.get(ck, (c_lo, c_hi))
 user_up = s.upscale
 cells = len(scan.h) * len(scan.v)
 cap = max([f for f in UPSCALE_STEPS if cells * f * f <= MAP_CELLS_MAX] or [1])
-s_disp = Settings.from_dict({**s.as_dict(), "upscale": min(user_up, cap)})
-r = cached_compute(*SKEY, sjson(s_disp))
+r = cached_compute(*SKEY, sjson(s), min(user_up, cap))     # measure on full upscale, display capped
 if r is None:
     with main:
         st.warning("No data in the selected range.")
@@ -493,7 +495,7 @@ wl = "slice thickness" if scan.is_yz else "beam width"
 
 
 # ============================================================================ figures
-def map_figure(height_hint: int):
+def map_figure(width_hint: int):
     hu, vu = r.hu, r.vu
     lab = r.label
     if s.unit == Unit.DB:
@@ -506,7 +508,7 @@ def map_figure(height_hint: int):
     fig = go.Figure(go.Heatmap(
         x=hu, y=vu, z=r.dispu, customdata=r.linu, colorscale=CMAPS[ss[K(sid, "cmap")]],
         zmin=clim[0], zmax=clim[1], zsmooth="best" if user_up > 1 else False,
-        colorbar=dict(title=dict(text=lab, side="right"), thickness=12, outlinewidth=0, x=1.0, xpad=14),
+        showscale=False,
         hovertemplate=f"{r.hn} %{{x:.3f}} mm · {scan.vname} %{{y:.3f}} mm<br><b>%{{z:.4g}} {dunit}</b>{extra}<extra></extra>"))
     v = r.v
     if tg["contour"] and r.normu.shape[0] > 1 and r.normu.shape[1] > 1:
@@ -540,27 +542,52 @@ def map_figure(height_hint: int):
     # x labels on top and bottom: a second x axis that mirrors the first
     fig.add_trace(go.Scatter(x=[he[0]], y=[ve[0]], xaxis="x2", mode="markers", marker=dict(opacity=0),
                              hoverinfo="skip", showlegend=False))
-    ml, mr, mt, mb = 62, 118, 64, 58
+
+    # Colour scale as a horizontal bar under the map. It lives on its own x-axis that *matches* the map's
+    # x-axis, so Plotly keeps it exactly as wide as the map (even when equal scaling narrows the map), and
+    # the map is anchored to the bottom of its area so the bar always sits directly beneath it.
+    lo, hi = clim
+    g = np.linspace(lo, hi, 256)
+    gx = np.linspace(he[0], he[1], 256)
+    fig.add_trace(go.Heatmap(x=gx, y=[0, 1], z=[g, g], colorscale=CMAPS[ss[K(sid, "cmap")]], zmin=lo, zmax=hi,
+                             showscale=False, xaxis="x3", yaxis="y3",
+                             hovertemplate=f"%{{z:.4g}} {dunit}<extra></extra>"))
+    from matplotlib.ticker import MaxNLocator
+    tv = [t for t in MaxNLocator(nbins=6).tick_values(lo, hi) if lo - 1e-12 <= t <= hi + 1e-12]
+    tpos = [he[0] + (t - lo) / (hi - lo) * (he[1] - he[0]) for t in tv]
+
+    ml, mr, mt, mb = 62, 16, 64, 48                      # mt: top x labels; mb: bar ticks + title
+    bar_px, gap_px = 14, 58                              # gap: bottom x tick labels + title above the bar
     ratio = (he[1] - he[0]) / (ve[1] - ve[0])
-    H = int(min(max((height_hint - ml - mr) / ratio + mt + mb, 420), 960))
+    ph = min(max((width_hint - ml - mr) / ratio, 300), 900)
+    H = int(round(mt + ph + gap_px + bar_px + mb))
+    P = H - mt - mb
     fig.update_layout(
         height=H, margin=dict(l=ml, r=mr, t=mt, b=mb), showlegend=False, hoverlabel=dict(font_size=12),
-        xaxis=dict(range=list(he), title=xt, side="bottom", showgrid=False, zeroline=False,
-                   constrain="domain", constraintoward="left", ticks="outside"),
+        xaxis=dict(range=list(he), title=xt, side="bottom", showgrid=False, zeroline=False, ticks="outside",
+                   constrain="domain", constraintoward="left"),
         xaxis2=dict(range=list(he), title=xt, side="top", overlaying="x", matches="x", showgrid=False,
                     zeroline=False, ticks="outside"),
-        yaxis=dict(range=[ve[1], ve[0]] if down else list(ve), showgrid=False, zeroline=False,
+        yaxis=dict(range=[ve[1], ve[0]] if down else list(ve), showgrid=False, zeroline=False, ticks="outside",
                    title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)",
-                   scaleanchor="x", scaleratio=1, constrain="domain", constraintoward="top", ticks="outside"))
+                   domain=[(bar_px + gap_px) / P, 1], scaleanchor="x", scaleratio=1,
+                   constrain="domain", constraintoward="bottom"),
+        xaxis3=dict(matches="x", anchor="y3", constrain="domain", constraintoward="left", showgrid=False,
+                    zeroline=False, ticks="outside", tickvals=tpos, ticktext=[f"{t:g}" for t in tv],
+                    title=dict(text=lab, standoff=4)),
+        yaxis3=dict(domain=[0, bar_px / P], anchor="x3", showticklabels=False, ticks="", showgrid=False,
+                    zeroline=False, fixedrange=True, range=[0, 1]))
     return fig, H
 
 
 def profile_figure(H: int):
     pf = make_subplots(specs=[[{"secondary_y": True}]])
-    pf.add_trace(go.Scatter(x=r.v, y=r.widths, mode="lines+markers", name=f"{r.lvl} {wl}",
+    pv = r.pv if r.pv is not None else r.v
+    mode = "lines+markers" if len(pv) <= 60 else "lines"
+    pf.add_trace(go.Scatter(x=pv, y=r.widths, mode=mode, name=f"{r.lvl} {wl}",
                             line=dict(color=C["acc"], width=2), marker=dict(size=5),
                             hovertemplate="%{y:.3f} mm"), secondary_y=False)
-    pf.add_trace(go.Scatter(x=r.v, y=r.amp, mode="lines+markers", name=r.alab,
+    pf.add_trace(go.Scatter(x=pv, y=r.amp, mode=mode, name=r.alab,
                             line=dict(color=C["org"], width=2), marker=dict(size=5, symbol="square"),
                             hovertemplate="%{y:.4g}"), secondary_y=True)
     pf.add_vline(x=r.fv, line=dict(color=C["mute"], dash="dot", width=1))
@@ -579,7 +606,7 @@ def profile_figure(H: int):
 
 
 def export_png() -> bytes:
-    rf = cached_compute(*SKEY, sjson(s))                     # full requested upscale for the export
+    rf = cached_compute(*SKEY, sjson(s), None)               # full requested upscale for the export
     return render_png(scan, s, rf, {**tg, "top": True}, ss[K(sid, "cmap")], clim, dark=dark, profile=tg["profile"])
 
 
@@ -599,7 +626,7 @@ with main:
         st.toggle("View settings", key="show_panel")
 
     # header: scan info (left) | summary (right)
-    h_left, h_right = st.columns([1.1, 1], gap="large")
+    h_left, h_right = st.columns([1.1, 1], gap="large", vertical_alignment="bottom")
     with h_left:
         st.markdown(f"# {scan.title}")
         fixed = AXIS_NAMES[scan.fixed_ax]
@@ -613,7 +640,6 @@ with main:
         st.markdown("<table class='bl-props'>" + "".join(f"<tr><td class='k'>{k}</td><td>{v}</td></tr>"
                                                           for k, v in props) + "</table>", unsafe_allow_html=True)
     with h_right:
-        st.markdown("<div class='bl-sum-title'>Summary</div>", unsafe_allow_html=True)
         with st.container(border=True):
             a, b = st.columns(2)
             if s.unit in (Unit.PPOS, Unit.PNEG):
@@ -631,7 +657,7 @@ with main:
 
     # body: beam map | plot parameters, then details across the full width
     c_map, c_plot = st.columns(2, gap="large")
-    half_px = 600 if ss.show_panel else 820                 # approx. half-column width, used for the aspect
+    half_px = 480 if ss.show_panel else 700                 # typical half-column width; sets the map height
     with c_map:
         st.markdown("**Beam map**" + (f"  <span style='opacity:.5;font-size:.85rem'>display {min(user_up, cap)}× "
                                        f"+ smoothing</span>" if user_up > cap else ""), unsafe_allow_html=True)
@@ -641,10 +667,7 @@ with main:
     with c_plot:
         if tg["profile"]:
             st.markdown(f"**{'Thickness' if scan.is_yz else 'Width'} & on-axis signal vs depth**")
-            st.plotly_chart(profile_figure(min(H, 620)), width="stretch", config={"displaylogo": False})
-        else:
-            st.markdown("**Details**")
-            st.code("\n".join(r.lines), language=None, wrap_lines=True)
-    if tg["profile"]:
+            st.plotly_chart(profile_figure(min(max(H - 300, 360), 560)), width="stretch",
+                            config={"displaylogo": False})
         st.markdown("**Details**")
         st.code("\n".join(r.lines), language=None, wrap_lines=True)

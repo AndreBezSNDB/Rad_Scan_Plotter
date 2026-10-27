@@ -389,6 +389,8 @@ class Result:
     widths: np.ndarray
     amp: np.ndarray
     alab: str
+    pv: Optional[np.ndarray] = None          # depth coordinates of widths/amp (upsampled grid if upscaled)
+    meas_up: int = 1                         # upscale factor the measurements were made on
     lines: list = field(default_factory=list)
 
     @property
@@ -406,11 +408,19 @@ class Result:
         return d["zb_"] - d["za_"], True
 
 
-def compute(scan: Scan, st: Settings) -> Optional[Result]:
+def compute(scan: Scan, st: Settings, display_up: Optional[int] = None) -> Optional[Result]:
+    """Measurements use the grid upsampled by st.upscale (bicubic); the returned display arrays
+    (hu/vu/linu/normu/dispu) use display_up instead when given (to keep the on-screen map light).
+    Peak pressure and focal position always come from the measured (raw) grid."""
     h, v, lin, unit = view(scan, st)
     if lin.size == 0 or np.all(np.isnan(lin)):
         return None
-    hu, vu, linu = upscaled(h, v, lin, st.upscale)
+    mh, mv, mlin = upscaled(h, v, lin, st.upscale)                 # measurement grid
+    meas_up = st.upscale if mlin.shape != lin.shape else 1
+    if display_up is None or display_up == st.upscale:
+        hu, vu, linu = mh, mv, mlin
+    else:
+        hu, vu, linu = upscaled(h, v, lin, display_up)
     normu, dispu, label = display(linu, st)
     level = st.level_db if st.level_db < 0 else -3.0
     frac, lvl = 10 ** (level / 20), f"{level:g} dB"
@@ -418,21 +428,25 @@ def compute(scan: Scan, st: Settings) -> Optional[Result]:
     iv, ih = np.unravel_index(np.nanargmax(lin), lin.shape)
     fh, fv, fval = float(h[ih]), float(v[iv]), float(lin[iv, ih])
     fval_mpa = fval * 1e-3 / st.volts_per_mpa if unit == "mV" else (fval if st.unit == Unit.PPP else None)
-    wa, wb = crossings(h, lin[iv, :], ih, frac)
+    # focal width on the measurement grid: the row nearest the focal depth, around its own peak
+    iu = int(np.abs(mv - fv).argmin())
+    row = mlin[iu, :]
+    ju = int(np.nanargmax(row)) if not np.all(np.isnan(row)) else ih
+    wa, wb = crossings(mh, row, ju, frac)
     ax_x = (0.0, 0.0) if st.deskew else (float(st.axis_h(v[0])), float(st.axis_h(v[-1])))
 
-    depth, widths = None, np.full(len(v), np.nan)
-    amp, alab = np.full(len(v), np.nan), "On-axis signal"
+    depth, widths = None, np.full(len(mv), np.nan)
+    amp, alab = np.full(len(mv), np.nan), "On-axis signal"
     if lin.shape[0] >= 2 and lin.shape[1] >= 2:
-        vs, hs, prof = axial_profile(h, v, lin, *ax_x)
+        vs, hs, prof = axial_profile(mh, mv, mlin, *ax_x)
         if not np.all(np.isnan(prof)):
             ip = int(np.nanargmax(prof))
             za, zb = crossings(vs, prof, ip, frac)
             za_, zb_ = (v[0] if za is None else za), (v[-1] if zb is None else zb)
             depth = dict(peak=float(vs[ip]), za=za, zb=zb, za_=float(za_), zb_=float(zb_),
                          xa=float(np.interp(za_, vs, hs)), xb=float(np.interp(zb_, vs, hs)))
-        widths = depth_widths(h, lin, frac)
-        _, _, onaxis = axial_profile(h, v, lin, *ax_x, n=len(v))
+        widths = depth_widths(mh, mlin, frac)
+        _, _, onaxis = axial_profile(mh, mv, mlin, *ax_x, n=len(mv))
         ref = np.nanmax(lin)
         if st.unit == Unit.DB:
             amp, alab = 20 * np.log10(np.clip(onaxis / ref, 10 ** (DB_FLOOR / 20), None)), "On-axis (dB re max)"
@@ -446,39 +460,31 @@ def compute(scan: Scan, st: Settings) -> Optional[Result]:
 
     r = Result(h=h, v=v, lin=lin, unit=unit, hu=hu, vu=vu, linu=linu, normu=normu, dispu=dispu, label=label,
                frac=frac, lvl=lvl, hn=hn, fh=fh, fv=fv, fval=fval, fval_mpa=fval_mpa, wa=wa, wb=wb, ax_x=ax_x,
-               depth=depth, widths=widths, amp=amp, alab=alab)
+               depth=depth, widths=widths, amp=amp, alab=alab, pv=mv, meas_up=meas_up)
 
     s = scan
-    hdr = f"{s.title}" + (f"  {s.freq:g} MHz" if s.freq is not None else "") + \
-          f"  |  {s.plane} at {AXIS_NAMES[s.fixed_ax]} = {s.fixed_val:.2f} mm"
-    if st.upscale > 1:
-        hdr += f"  |  display {st.upscale}x bicubic"
-    if st.deskew:
-        hdr += f"  |  deskewed ({hn} = {s.hname} − axis, tilt {st.tilt_deg:+.2f}°)"
-    r.lines.append(hdr)
-    txt = f"Focal max: {hn} = {fh:.2f} mm, {s.vname} = {fv:.2f} mm, {fval:.4g} {unit}"
-    if unit == "mV":
-        txt += f" (p–p {fval_mpa:.4g} MPa)"
-    if st.deskew:
-        txt += f" [original {s.hname} = {fh + float(st.axis_h(fv)):.2f}]"
-    r.lines.append(txt)
-    r.lines.append(f"Focal width ({lvl}): {wb - wa:.3f} mm  ({hn} {wa:.2f} → {wb:.2f})" if r.width is not None
-                   else f"Focal width ({lvl}): beam doesn't fall to {lvl} inside the selected range")
-    if depth:
-        if depth["za"] is not None and depth["zb"] is not None:
-            r.lines.append(f"Focal depth ({lvl}) along axis: {depth['zb'] - depth['za']:.2f} mm "
-                           f"({depth['za']:.2f} → {depth['zb']:.2f}); axial peak {depth['peak']:.2f} mm")
-        else:
-            r.lines.append(f"Focal depth ({lvl}) along axis: > {depth['zb_'] - depth['za_']:.2f} mm "
-                           f"({depth['za_']:.2f} → {depth['zb_']:.2f}), still above {lvl} at the edge of the "
-                           f"selected range; axial peak {depth['peak']:.2f} mm")
+    # short lines (≤ ~55 chars) so the details box doesn't wrap
+    fmax = f"{fval_mpa:.4g} MPa" if fval_mpa is not None else f"{fval:.4g} {unit}"
+    at = f"{hn} = {fh:.2f}" + (f" ({s.hname} {fh + float(st.axis_h(fv)):.2f})" if st.deskew else "")
+    r.lines.append(f"Focal max: {fmax} [at {at}]")
+    r.lines.append(f"Beamwidth ({lvl}): {wb - wa:.3f} mm at {s.vname} = {fv:.2f}" if r.width is not None
+                   else f"Beamwidth ({lvl}): beam doesn't fall to {lvl} in range")
     ok = ~np.isnan(widths)
     if ok.any():
         k = int(np.nanargmin(widths))
-        r.lines.append(f"Narrowest width: {widths[k]:.3f} mm at {s.vname} = {v[k]:.2f} mm"
-                       + ("" if ok.all() else f"; undefined at {int((~ok).sum())} depth(s)"))
-    if not st.deskew:
-        r.lines.append(f"Beam axis tilt: {st.tilt_deg:+.2f}° ({np.tan(np.radians(st.tilt_deg)) * 1e3:+.1f} µm/mm)")
+        r.lines.append(f"Focal beamwidth: {widths[k]:.3f} mm at {s.vname} = {mv[k]:.2f}")
+    if depth:
+        if depth["za"] is not None and depth["zb"] is not None:
+            r.lines.append(f"Focal depth ({lvl}): {depth['zb'] - depth['za']:.2f} mm "
+                           f"({depth['za']:.2f} → {depth['zb']:.2f})")
+        else:
+            r.lines.append(f"Focal depth ({lvl}): > {depth['zb_'] - depth['za_']:.2f} mm "
+                           f"({depth['za_']:.2f} → {depth['zb_']:.2f})")
+        r.lines.append(f"Axial peak: {s.vname} = {depth['peak']:.2f} mm")
+    r.lines.append(f"Axis tilt: {st.tilt_deg:+.2f}° ({np.tan(np.radians(st.tilt_deg)) * 1e3:+.1f} µm/mm)"
+                   + (" · deskewed" if st.deskew else ""))
+    r.lines.append(f"Grid: {s.plane} at {AXIS_NAMES[s.fixed_ax]} = {s.fixed_val:.2f} mm"
+                   + (f" · widths on {meas_up}× grid" if meas_up > 1 else ""))
     return r
 
 
@@ -486,7 +492,7 @@ def compute(scan: Scan, st: Settings) -> Optional[Result]:
 def profile_csv(scan: Scan, r: Result) -> str:
     lines = [f"# {scan.title} - {scan.plane} scan, width at {r.lvl} of each depth's peak; on-axis in {r.alab}",
              f"{scan.vname}_mm,width_mm,on_axis"]
-    for z, w, a in zip(r.v, r.widths, r.amp):
+    for z, w, a in zip(r.pv if r.pv is not None else r.v, r.widths, r.amp):
         lines.append(f"{z:.4f},{'' if np.isnan(w) else f'{w:.5f}'},{'' if np.isnan(a) else f'{a:.6g}'}")
     return "\n".join(lines) + "\n"
 
@@ -550,14 +556,15 @@ def render_png(scan: Scan, st: Settings, r: Result, overlays: dict, cmap: str, c
     if profile:
         axp = fig.add_axes([6.75 / W, 0.75 / H, 5.2 / W, (H - 1.9) / H])
         wl = "slice thickness" if scan.is_yz else "beam width"
-        axp.plot(r.v, r.widths, "o-", color=T["acc"], ms=3.5, lw=1.8, label=f"{r.lvl} {wl}")
+        pv = r.pv if r.pv is not None else r.v
+        axp.plot(pv, r.widths, "o-" if len(pv) <= 60 else "-", color=T["acc"], ms=3.5, lw=1.8, label=f"{r.lvl} {wl}")
         axp.set_ylabel(f"{r.lvl} {wl} (mm)", color=T["acc"])
         axp.set_xlabel(f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)")
         axp.grid(True, color=T["grid"])
         if np.any(~np.isnan(r.widths)):
             axp.set_ylim(0, np.nanmax(r.widths) * 1.15)
         ax2 = axp.twinx()
-        ax2.plot(r.v, r.amp, "s-", color=T["org"], ms=3.5, lw=1.8, label=r.alab)
+        ax2.plot(pv, r.amp, "s-" if len(pv) <= 60 else "-", color=T["org"], ms=3.5, lw=1.8, label=r.alab)
         ax2.set_ylabel(r.alab, color=T["org"])
         if st.unit != Unit.DB and np.any(~np.isnan(r.amp)) and np.nanmax(r.amp) > 0:
             ax2.set_ylim(0, np.nanmax(r.amp) * 1.12)
