@@ -666,7 +666,7 @@ with main:
                         {"filename": f"{scan.title}_map", "scale": 3}})
     with c_plot:
         if tg["profile"]:
-            st.markdown(f"**{'Thickness' if scan.is_yz else 'Width'} & on-axis signal vs depth**")
+            st.markdown("**Beamwidth and Signal Strength vs depth**")
             st.plotly_chart(profile_figure(min(max(H - 300, 360), 560)), width="stretch",
                             config={"displaylogo": False})
         st.markdown("**Details**")
