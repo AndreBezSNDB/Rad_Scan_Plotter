@@ -23,7 +23,7 @@ from beamcore import (AXIS_NAMES, Scan, Settings, Unit, UPSCALE_STEPS, autofit, 
 from store import UserStore
 import merge as mg
 
-APP_VERSION = "2026-10-28 build 9"     # shown in the sidebar so you can confirm what is deployed
+APP_VERSION = "2026-10-28 build 10"     # shown in the sidebar so you can confirm what is deployed
 
 st.set_page_config(page_title="Beam Lab", page_icon="〰️", layout="wide", initial_sidebar_state="expanded")
 
@@ -639,7 +639,10 @@ def map_figure(plot_h: int):
     return fig, H
 
 
-def profile_figure(H: int):
+CUR_COL = (("#9a6dd7", "#9065b0"), ("#4dab9a", "#448361"))      # (dark, light) colours of markers 1 and 2
+
+
+def profile_figure(H: int, ncur: int = 0):
     pf = make_subplots(specs=[[{"secondary_y": True}]])
     pv = r.pv if r.pv is not None else r.v
     mode = "lines+markers" if len(pv) <= 60 else "lines"
@@ -649,9 +652,11 @@ def profile_figure(H: int):
     pf.add_trace(go.Scatter(x=pv, y=r.amp, mode=mode, name=r.alab,
                             line=dict(color=C["org"], width=2), marker=dict(size=5, symbol="square"),
                             hovertemplate="%{y:.4g}"), secondary_y=True)
-    pf.add_vline(x=r.fv, line=dict(color=C["mute"], dash="dot", width=1))
-    pf.update_xaxes(title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)")
     wmax = np.nanmax(r.widths) if np.any(~np.isnan(r.widths)) else 1
+    # focal-depth guide as a trace (not a shape) so that only the markers are draggable
+    pf.add_trace(go.Scatter(x=[r.fv, r.fv], y=[0, wmax * 1.15], mode="lines", showlegend=False, hoverinfo="skip",
+                            line=dict(color=C["mute"], dash="dot", width=1)), secondary_y=False)
+    pf.update_xaxes(title=f"{scan.vname} (mm from probe)" if scan.depth_is_z else f"{scan.vname} position (mm)")
     pf.update_yaxes(title=dict(text=f"{r.lvl} Beamwidth (mm)", font=dict(color=C["acc"])), range=[0, wmax * 1.15],
                     tickfont=dict(color=C["acc"]), secondary_y=False)
     a2 = dict(title=dict(text=r.alab, font=dict(color=C["org"])), tickfont=dict(color=C["org"]), showgrid=False,
@@ -659,9 +664,156 @@ def profile_figure(H: int):
     if s.unit != Unit.DB and np.any(~np.isnan(r.amp)) and np.nanmax(r.amp) > 0:
         a2["range"] = [0, float(np.nanmax(r.amp)) * 1.12]
     pf.update_yaxes(**a2, secondary_y=True)
-    pf.update_layout(height=H, margin=dict(l=10, r=10, t=64, b=58), hovermode="x unified",
+    bottom = 58
+    if ncur:
+        # draggable markers: vertical line shapes; app JS keeps them vertical, clamps them to the data and
+        # writes the readout under the plot (see CURSOR_JS)
+        lo, hi = float(np.nanmin(pv)), float(np.nanmax(pv))
+        span = hi - lo
+        x2 = r.fv + span / 4 if r.fv + span / 4 <= hi else r.fv - span / 4
+        for i, x in enumerate((r.fv, x2)[:ncur]):
+            col = CUR_COL[i][0 if dark else 1]
+            pf.add_shape(type="line", name=f"cur{i + 1}", xref="x", yref="paper", x0=x, x1=x, y0=0, y1=1,
+                         line=dict(color=col, width=2, dash="dash"), layer="above")
+            pf.add_annotation(name=f"curlab{i + 1}", text=f"<b>{i + 1}</b>", x=x, xref="x", y=1, yref="paper",
+                              yanchor="bottom", showarrow=False, font=dict(color="#ffffff", size=11),
+                              bgcolor=col, borderpad=2)
+        pf.add_annotation(name="readout", text=" ", x=0, xref="paper", xanchor="left", y=0, yref="paper",
+                          yanchor="top", yshift=-50, align="left", showarrow=False,
+                          font=dict(family="JetBrains Mono, SFMono-Regular, Menlo, Consolas, monospace", size=12))
+        bottom += 20 * (ncur + (ncur == 2)) + 6
+        sig_unit = {Unit.DB: "dB", Unit.NORM: "", Unit.VPP: "mV"}.get(s.unit, "MPa")
+        pf.update_layout(meta=dict(bl=1, key=f"{sid}|{scan.vname}", z=scan.vname, unit=sig_unit,
+                                   db=s.unit == Unit.DB, norm=s.unit == Unit.NORM,
+                                   cols=[CUR_COL[i][0 if dark else 1] for i in range(ncur)],
+                                   **{"def": {f"cur{i + 1}": float(x) for i, x in enumerate((r.fv, x2)[:ncur])}}))
+    pf.update_layout(height=H + bottom - 58, margin=dict(l=10, r=10, t=64, b=bottom), hovermode="x unified",
                      legend=dict(orientation="h", y=1.1, x=0, bgcolor="rgba(0,0,0,0)"))
     return pf
+
+
+# JavaScript for the depth-plot markers. Plotly lets the user drag the line shapes; this keeps them vertical,
+# clamps them to the data, remembers their positions across reruns (per scan) and writes the readout.
+# Note: Streamlit sanitizes st.html with DOMPurify, which drops a <script> whose text contains "<tag"-like
+# sequences, so HTML inside the JS strings is written with \x3c instead of a literal "<".
+CURSOR_JS = r"""<script>
+(function () {
+  if (window.__blCurInit) return;
+  window.__blCurInit = true;
+  window.__blCur = window.__blCur || {};
+  var CIRC = ['\u2460', '\u2461'];
+  function fin(v) { return typeof v === 'number' && isFinite(v); }
+  function interp(xs, ys, x) {
+    for (var i = 0; i < xs.length - 1; i++) {
+      var a = xs[i], b = xs[i + 1];
+      if (x >= Math.min(a, b) && x <= Math.max(a, b)) {
+        var ya = ys[i], yb = ys[i + 1];
+        if (a === b) return fin(ya) ? ya : NaN;
+        var f = (x - a) / (b - a);
+        if (!fin(ya) || !fin(yb)) return f < 0.5 ? (fin(ya) ? ya : NaN) : (fin(yb) ? yb : NaN);
+        return ya + (yb - ya) * f;
+      }
+    }
+    return xs.length === 1 && x === xs[0] ? ys[0] : NaN;
+  }
+  function sgn(v, d) { var q = Number(v.toFixed(d)); return (q >= 0 ? '+' : '\u2212') + Math.abs(q).toFixed(d); }
+  function fsig(v, m) {
+    if (!fin(v)) return '\u2014';
+    if (m.db) return v.toFixed(2) + ' dB';
+    if (m.norm) return v.toFixed(3);
+    return Number(v.toPrecision(4)) + ' ' + m.unit;
+  }
+  function cursorShapes(gd) {
+    var out = [];
+    (gd.layout.shapes || []).forEach(function (s, i) { if (s.name && /^cur\d$/.test(s.name)) out.push([i, s]); });
+    return out;
+  }
+  function annIndex(gd, name) {
+    var a = gd.layout.annotations || [];
+    for (var i = 0; i < a.length; i++) if (a[i].name === name) return i;
+    return -1;
+  }
+  function sync(gd, ev, place) {
+    var m = gd.layout && gd.layout.meta;
+    if (!m || !m.bl || !gd._fullData || gd._fullData.length < 2) return;
+    var xs = Array.from(gd._fullData[0].x || []).map(Number), w = Array.from(gd._fullData[0].y || []).map(Number),
+        sg = Array.from(gd._fullData[1].y || []).map(Number);
+    var fx = xs.filter(fin);
+    if (!fx.length) return;
+    var lo = Math.min.apply(null, fx), hi = Math.max.apply(null, fx);
+    var mem = window.__blCur[m.key] = window.__blCur[m.key] || {};
+    var cs = cursorShapes(gd);
+    if (place !== undefined && cs.length) {            // click: move the nearest marker there
+      var best = cs[0][1].name, bd = Infinity;
+      cs.forEach(function (c) { var d = Math.abs((mem[c[1].name] !== undefined ? mem[c[1].name] : +c[1].x0) - place);
+                                if (d < bd) { bd = d; best = c[1].name; } });
+      mem[best] = place;
+      var placed = best;
+    }
+    var upd = {}, rows = [], vals = [];
+    function set(k, v) { var cur = k.split('.').reduce(function (o, p) {
+        var mm = p.match(/^(\w+)\[(\d+)\]$/); return o == null ? o : (mm ? (o[mm[1]] || [])[+mm[2]] : o[p]); }, gd.layout);
+      if (typeof v === 'number' ? !(fin(+cur) && Math.abs(+cur - v) < 1e-9) : cur !== v) upd[k] = v; }
+    cs.forEach(function (c) {
+      var i = c[0], s = c[1], x0 = +s.x0, x1 = +s.x1, prev = mem[s.name], x;
+      // moved by the user = differs from both the stored position and the server default (a rerun resets the
+      // shapes to the default, in which case the stored position wins)
+      var dv = (m.def || {})[s.name], off = function (a) { return a === undefined || Math.abs(x0 - a) > 1e-9 || Math.abs(x1 - a) > 1e-9; };
+      var dragged = (ev && (('shapes[' + i + '].x0') in ev || ('shapes[' + i + '].x1') in ev)) || (off(dv) && off(prev));
+      if (s.name === placed) x = prev;
+      else if (dragged) x = prev === undefined ? x0 : (Math.abs(x0 - prev) >= Math.abs(x1 - prev) ? x0 : x1);
+      else x = prev !== undefined ? prev : x0;
+      if (!fin(x)) x = (lo + hi) / 2;
+      x = Math.min(hi, Math.max(lo, x));
+      mem[s.name] = x;
+      set('shapes[' + i + '].x0', x); set('shapes[' + i + '].x1', x);
+      set('shapes[' + i + '].y0', 0); set('shapes[' + i + '].y1', 1);
+      var li = annIndex(gd, 'curlab' + s.name.slice(3));
+      if (li >= 0) set('annotations[' + li + '].x', x);
+      var n = +s.name.slice(3);
+      var bw = interp(xs, w, x), sv = interp(xs, sg, x);
+      vals.push([x, bw, sv]);
+      var col = (m.cols || [])[n - 1] || 'inherit';
+      rows.push('\x3cspan style="color:' + col + '">\x3cb>' + CIRC[n - 1] + '\x3c/b>\x3c/span> ' + m.z + ' ' + x.toFixed(2) + ' mm \u00b7 BW ' +
+                (fin(bw) ? bw.toFixed(3) + ' mm' : '\u2014') + ' \u00b7 ' + fsig(sv, m));
+    });
+    if (vals.length === 2) {
+      var a = vals[0], b = vals[1], d = '\u0394' + m.z + ' ' + Math.abs(b[0] - a[0]).toFixed(2) + ' mm \u00b7 \u0394BW ' +
+          (fin(a[1]) && fin(b[1]) ? sgn(b[1] - a[1], 3) + ' mm' : '\u2014') +
+          (gd._fullLayout.width < 620 ? '\x3cbr>   ' : ' \u00b7 ') + '\u0394sig ';   // wrap on narrow panels
+      if (!fin(a[2]) || !fin(b[2])) d += '\u2014';
+      else if (m.db) d += sgn(b[2] - a[2], 2) + ' dB';
+      else if (a[2] > 0 && b[2] > 0) d += sgn(100 * (b[2] / a[2] - 1), 1) + ' % (' + sgn(20 * Math.log10(b[2] / a[2]), 2) + ' dB)';
+      else d += sgn(b[2] - a[2], 4) + (m.unit ? ' ' + m.unit : '');
+      rows.push(d + '  \x3cspan style="opacity:.55">(\u2461\u2212\u2460)\x3c/span>');
+    }
+    var ri = annIndex(gd, 'readout');
+    if (ri >= 0) {
+      var txt = rows.join('\x3cbr>') || ' ';
+      set('annotations[' + ri + '].text', txt);
+      set('margin.b', 58 + 20 * (txt.split('\x3cbr>').length) + 6);
+    }
+    if (Object.keys(upd).length) {
+      gd.__blBusy = true;
+      Promise.resolve(window.Plotly.relayout(gd, upd)).finally(function () { gd.__blBusy = false; });
+    }
+  }
+  function attach() {
+    if (!window.Plotly) return;
+    document.querySelectorAll('.st-key-profchart .js-plotly-plot').forEach(function (gd) {
+      var host = gd._ev || gd;        // Plotly drops all listeners (and _ev) when it re-creates a plot
+      if (!host.__blCursors && gd.on) {
+        host.__blCursors = true;
+        gd.on('plotly_relayout', function (ev) { if (!gd.__blBusy) sync(gd, ev); });
+        gd.on('plotly_afterplot', function () { if (!gd.__blBusy) sync(gd); });
+        gd.on('plotly_click', function (e) { if (e && e.points && e.points.length && fin(+e.points[0].x)) sync(gd, null, +e.points[0].x); });
+      }
+      if (!gd.__blBusy) sync(gd);
+    });
+  }
+  setInterval(attach, 400);
+})();
+</script>"""
 
 
 def export_png() -> bytes:
@@ -791,7 +943,7 @@ with main:
     st.markdown(f"""<style>
       .st-key-stack {{display: grid !important; grid-template-columns: minmax(0, 1fr);}}
       .st-key-stack > * {{grid-row: 1; grid-column: 1; min-width: 0; pointer-events: none;}}
-      .st-key-mapzone, .st-key-mapzone *, .st-key-overlay, .st-key-overlay * {{pointer-events: auto;}}
+      .st-key-mapzone, .st-key-overlay {{pointer-events: auto;}}   /* inherited, so Plotly's own rules still apply */
       .st-key-overlay {{margin-left: {ss.split}%; width: calc(100% - {ss.split}%) !important; box-sizing: border-box;
                         position: relative; z-index: 5; align-self: stretch;
                         background: var(--bl-bg, #ffffff); padding-left: 1.4rem;
@@ -808,8 +960,24 @@ with main:
                             {"filename": f"{scan.title}_map", "scale": 3}})
         with st.container(key="overlay"):
             if tg["profile"]:
-                st.markdown("**Beamwidth and Signal Strength vs depth**")
-                st.plotly_chart(profile_figure(min(max(H - 320, 360), 560)), width="stretch",
-                                config={"displaylogo": False})
+                ss.setdefault("ncur", "2")
+
+                def _sync_ncur():
+                    ss.ncur = ss["ncur#w"] or "Off"
+
+                with st.container(horizontal=True, vertical_alignment="center"):
+                    st.markdown("**Beamwidth and Signal Strength vs depth**", width="stretch")
+                    st.segmented_control("Markers", ["Off", "1", "2"], default=ss.ncur, key="ncur#w",
+                                         on_change=_sync_ncur, label_visibility="collapsed",
+                                         help="Depth markers: drag a dashed line (or click the plot to move the "
+                                              "nearest one). Readout appears under the plot.")
+                ncur = 0 if ss.ncur == "Off" else int(ss.ncur)
+                with st.container(key="profchart"):
+                    st.plotly_chart(profile_figure(min(max(H - 320, 360), 560), ncur), width="stretch",
+                                    config={"displaylogo": False, "edits": {"shapePosition": True},
+                                            "toImageButtonOptions": {"filename": f"{scan.title}_profile",
+                                                                     "scale": 3}})
+                if ncur:
+                    st.html(CURSOR_JS, unsafe_allow_javascript=True, width="content")
             st.markdown("**Details**")
             st.code("\n".join(r.lines), language=None, wrap_lines=True)

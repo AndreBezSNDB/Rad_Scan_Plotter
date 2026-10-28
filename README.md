@@ -61,6 +61,13 @@ reports the amplitude ratio and overlap residual before you commit; the merged s
 library entry (the originals are untouched) and the fine region is outlined on the map. Don't re-home
 the stage between the two scans (or use Auto-align if you had to).
 
+## Depth markers
+
+The *Beamwidth and Signal Strength vs depth* plot has up to two draggable markers (Off / 1 / 2 above the
+plot). Drag a dashed line, or click the plot to move the nearest marker there. The readout under the plot
+gives depth, beamwidth and on-axis signal at each marker (interpolated) and the differences ② − ①; it is
+included when you save the plot with the camera icon. Positions are kept per scan while the page is open.
+
 ## Notes
 
 * **Light / dark:** app menu (⋮, top right) → Settings. Defaults to the device's setting.
