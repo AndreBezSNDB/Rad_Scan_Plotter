@@ -23,7 +23,7 @@ from beamcore import (AXIS_NAMES, Scan, Settings, Unit, UPSCALE_STEPS, autofit, 
 from store import UserStore
 import merge as mg
 
-APP_VERSION = "2026-10-28 build 10"     # shown in the sidebar so you can confirm what is deployed
+APP_VERSION = "2026-10-28 build 11"     # shown in the sidebar so you can confirm what is deployed
 
 st.set_page_config(page_title="Beam Lab", page_icon="〰️", layout="wide", initial_sidebar_state="expanded")
 
@@ -666,8 +666,8 @@ def profile_figure(H: int, ncur: int = 0):
     pf.update_yaxes(**a2, secondary_y=True)
     bottom = 58
     if ncur:
-        # draggable markers: vertical line shapes; app JS keeps them vertical, clamps them to the data and
-        # writes the readout under the plot (see CURSOR_JS)
+        # draggable markers: vertical line shapes moved by the app's own JS drag (see CURSOR_JS), which also
+        # writes the readout under the plot
         lo, hi = float(np.nanmin(pv)), float(np.nanmax(pv))
         span = hi - lo
         x2 = r.fv + span / 4 if r.fv + span / 4 <= hi else r.fv - span / 4
@@ -685,15 +685,15 @@ def profile_figure(H: int, ncur: int = 0):
         sig_unit = {Unit.DB: "dB", Unit.NORM: "", Unit.VPP: "mV"}.get(s.unit, "MPa")
         pf.update_layout(meta=dict(bl=1, key=f"{sid}|{scan.vname}", z=scan.vname, unit=sig_unit,
                                    db=s.unit == Unit.DB, norm=s.unit == Unit.NORM,
-                                   cols=[CUR_COL[i][0 if dark else 1] for i in range(ncur)],
-                                   **{"def": {f"cur{i + 1}": float(x) for i, x in enumerate((r.fv, x2)[:ncur])}}))
+                                   cols=[CUR_COL[i][0 if dark else 1] for i in range(ncur)]))
     pf.update_layout(height=H + bottom - 58, margin=dict(l=10, r=10, t=64, b=bottom), hovermode="x unified",
                      legend=dict(orientation="h", y=1.1, x=0, bgcolor="rgba(0,0,0,0)"))
     return pf
 
 
-# JavaScript for the depth-plot markers. Plotly lets the user drag the line shapes; this keeps them vertical,
-# clamps them to the data, remembers their positions across reruns (per scan) and writes the readout.
+# JavaScript for the depth-plot markers. Our own drag handler (not Plotly shape editing) moves a marker
+# horizontally only and redraws the readout on every animation frame while dragging. Positions are kept per
+# scan across reruns.
 # Note: Streamlit sanitizes st.html with DOMPurify, which drops a <script> whose text contains "<tag"-like
 # sequences, so HTML inside the JS strings is written with \x3c instead of a literal "<".
 CURSOR_JS = r"""<script>
@@ -701,7 +701,12 @@ CURSOR_JS = r"""<script>
   if (window.__blCurInit) return;
   window.__blCurInit = true;
   window.__blCur = window.__blCur || {};
-  var CIRC = ['\u2460', '\u2461'];
+  var CIRC = ['①', '②'], GRAB = 8;          // grab distance in px either side of a marker
+  var st = document.createElement('style');
+  st.textContent = '.bl-cur-near .nsewdrag, .bl-cur-near .draglayer * {cursor: ew-resize !important}' +
+                   '.bl-cur-drag, .bl-cur-drag * {cursor: ew-resize !important; user-select: none !important}' +
+                   '.bl-cur-drag .hoverlayer, .bl-cur-drag .spikelines {display: none !important}';   // no stale hover box
+  document.head.appendChild(st);
   function fin(v) { return typeof v === 'number' && isFinite(v); }
   function interp(xs, ys, x) {
     for (var i = 0; i < xs.length - 1; i++) {
@@ -716,12 +721,18 @@ CURSOR_JS = r"""<script>
     }
     return xs.length === 1 && x === xs[0] ? ys[0] : NaN;
   }
-  function sgn(v, d) { var q = Number(v.toFixed(d)); return (q >= 0 ? '+' : '\u2212') + Math.abs(q).toFixed(d); }
+  function sgn(v, d) { var q = Number(v.toFixed(d)); return (q >= 0 ? '+' : '−') + Math.abs(q).toFixed(d); }
   function fsig(v, m) {
-    if (!fin(v)) return '\u2014';
+    if (!fin(v)) return '—';
     if (m.db) return v.toFixed(2) + ' dB';
     if (m.norm) return v.toFixed(3);
     return Number(v.toPrecision(4)) + ' ' + m.unit;
+  }
+  function ok(gd) { var m = gd.layout && gd.layout.meta; return m && m.bl && gd._fullData && gd._fullData.length >= 2 && gd._fullLayout && gd._fullLayout.xaxis; }
+  function data(gd) {
+    var xs = Array.from(gd._fullData[0].x || []).map(Number), fx = xs.filter(fin);
+    return {xs: xs, w: Array.from(gd._fullData[0].y || []).map(Number), sg: Array.from(gd._fullData[1].y || []).map(Number),
+            lo: Math.min.apply(null, fx), hi: Math.max.apply(null, fx), n: fx.length};
   }
   function cursorShapes(gd) {
     var out = [];
@@ -733,59 +744,41 @@ CURSOR_JS = r"""<script>
     for (var i = 0; i < a.length; i++) if (a[i].name === name) return i;
     return -1;
   }
-  function sync(gd, ev, place) {
-    var m = gd.layout && gd.layout.meta;
-    if (!m || !m.bl || !gd._fullData || gd._fullData.length < 2) return;
-    var xs = Array.from(gd._fullData[0].x || []).map(Number), w = Array.from(gd._fullData[0].y || []).map(Number),
-        sg = Array.from(gd._fullData[1].y || []).map(Number);
-    var fx = xs.filter(fin);
-    if (!fx.length) return;
-    var lo = Math.min.apply(null, fx), hi = Math.max.apply(null, fx);
-    var mem = window.__blCur[m.key] = window.__blCur[m.key] || {};
-    var cs = cursorShapes(gd);
-    if (place !== undefined && cs.length) {            // click: move the nearest marker there
-      var best = cs[0][1].name, bd = Infinity;
-      cs.forEach(function (c) { var d = Math.abs((mem[c[1].name] !== undefined ? mem[c[1].name] : +c[1].x0) - place);
-                                if (d < bd) { bd = d; best = c[1].name; } });
-      mem[best] = place;
-      var placed = best;
-    }
-    var upd = {}, rows = [], vals = [];
-    function set(k, v) { var cur = k.split('.').reduce(function (o, p) {
-        var mm = p.match(/^(\w+)\[(\d+)\]$/); return o == null ? o : (mm ? (o[mm[1]] || [])[+mm[2]] : o[p]); }, gd.layout);
+  function memOf(gd) { var k = gd.layout.meta.key; return window.__blCur[k] = window.__blCur[k] || {}; }
+  // bring the plot in line with the stored marker positions (only touches what differs)
+  function sync(gd) {
+    if (!ok(gd)) return;
+    var m = gd.layout.meta, D = data(gd);
+    if (!D.n) return;
+    var mem = memOf(gd), upd = {}, rows = [], vals = [];
+    function get(k) { return k.split('.').reduce(function (o, p) {
+        var mm = p.match(/^(\w+)\[(\d+)\]$/); return o == null ? o : (mm ? (o[mm[1]] || [])[+mm[2]] : o[p]); }, gd.layout); }
+    function set(k, v) { var cur = get(k);
       if (typeof v === 'number' ? !(fin(+cur) && Math.abs(+cur - v) < 1e-9) : cur !== v) upd[k] = v; }
-    cs.forEach(function (c) {
-      var i = c[0], s = c[1], x0 = +s.x0, x1 = +s.x1, prev = mem[s.name], x;
-      // moved by the user = differs from both the stored position and the server default (a rerun resets the
-      // shapes to the default, in which case the stored position wins)
-      var dv = (m.def || {})[s.name], off = function (a) { return a === undefined || Math.abs(x0 - a) > 1e-9 || Math.abs(x1 - a) > 1e-9; };
-      var dragged = (ev && (('shapes[' + i + '].x0') in ev || ('shapes[' + i + '].x1') in ev)) || (off(dv) && off(prev));
-      if (s.name === placed) x = prev;
-      else if (dragged) x = prev === undefined ? x0 : (Math.abs(x0 - prev) >= Math.abs(x1 - prev) ? x0 : x1);
-      else x = prev !== undefined ? prev : x0;
-      if (!fin(x)) x = (lo + hi) / 2;
-      x = Math.min(hi, Math.max(lo, x));
+    cursorShapes(gd).forEach(function (c) {
+      var i = c[0], s = c[1], n = +s.name.slice(3);
+      var x = mem[s.name] !== undefined ? mem[s.name] : +s.x0;
+      if (!fin(x)) x = (D.lo + D.hi) / 2;
+      x = Math.min(D.hi, Math.max(D.lo, x));
       mem[s.name] = x;
       set('shapes[' + i + '].x0', x); set('shapes[' + i + '].x1', x);
-      set('shapes[' + i + '].y0', 0); set('shapes[' + i + '].y1', 1);
-      var li = annIndex(gd, 'curlab' + s.name.slice(3));
+      var li = annIndex(gd, 'curlab' + n);
       if (li >= 0) set('annotations[' + li + '].x', x);
-      var n = +s.name.slice(3);
-      var bw = interp(xs, w, x), sv = interp(xs, sg, x);
+      var bw = interp(D.xs, D.w, x), sv = interp(D.xs, D.sg, x);
       vals.push([x, bw, sv]);
       var col = (m.cols || [])[n - 1] || 'inherit';
-      rows.push('\x3cspan style="color:' + col + '">\x3cb>' + CIRC[n - 1] + '\x3c/b>\x3c/span> ' + m.z + ' ' + x.toFixed(2) + ' mm \u00b7 BW ' +
-                (fin(bw) ? bw.toFixed(3) + ' mm' : '\u2014') + ' \u00b7 ' + fsig(sv, m));
+      rows.push('\x3cspan style="color:' + col + '">\x3cb>' + CIRC[n - 1] + '\x3c/b>\x3c/span> ' + m.z + ' ' + x.toFixed(2) +
+                ' mm · BW ' + (fin(bw) ? bw.toFixed(3) + ' mm' : '—') + ' · ' + fsig(sv, m));
     });
     if (vals.length === 2) {
-      var a = vals[0], b = vals[1], d = '\u0394' + m.z + ' ' + Math.abs(b[0] - a[0]).toFixed(2) + ' mm \u00b7 \u0394BW ' +
-          (fin(a[1]) && fin(b[1]) ? sgn(b[1] - a[1], 3) + ' mm' : '\u2014') +
-          (gd._fullLayout.width < 620 ? '\x3cbr>   ' : ' \u00b7 ') + '\u0394sig ';   // wrap on narrow panels
-      if (!fin(a[2]) || !fin(b[2])) d += '\u2014';
+      var a = vals[0], b = vals[1], d = 'Δ' + m.z + ' ' + Math.abs(b[0] - a[0]).toFixed(2) + ' mm · ΔBW ' +
+          (fin(a[1]) && fin(b[1]) ? sgn(b[1] - a[1], 3) + ' mm' : '—') +
+          (gd._fullLayout.width < 620 ? '\x3cbr>   ' : ' · ') + 'Δsig ';   // wrap on narrow panels
+      if (!fin(a[2]) || !fin(b[2])) d += '—';
       else if (m.db) d += sgn(b[2] - a[2], 2) + ' dB';
       else if (a[2] > 0 && b[2] > 0) d += sgn(100 * (b[2] / a[2] - 1), 1) + ' % (' + sgn(20 * Math.log10(b[2] / a[2]), 2) + ' dB)';
       else d += sgn(b[2] - a[2], 4) + (m.unit ? ' ' + m.unit : '');
-      rows.push(d + '  \x3cspan style="opacity:.55">(\u2461\u2212\u2460)\x3c/span>');
+      rows.push(d + '  \x3cspan style="opacity:.55">(②−①)\x3c/span>');
     }
     var ri = annIndex(gd, 'readout');
     if (ri >= 0) {
@@ -793,25 +786,89 @@ CURSOR_JS = r"""<script>
       set('annotations[' + ri + '].text', txt);
       set('margin.b', 58 + 20 * (txt.split('\x3cbr>').length) + 6);
     }
-    if (Object.keys(upd).length) {
+    if (Object.keys(upd).length && !gd.__blBusy) {
       gd.__blBusy = true;
-      Promise.resolve(window.Plotly.relayout(gd, upd)).finally(function () { gd.__blBusy = false; });
+      Promise.resolve(window.Plotly.relayout(gd, upd)).finally(function () {
+        gd.__blBusy = false;
+        if (gd.__blAgain) { gd.__blAgain = false; sync(gd); }     // a newer position arrived meanwhile
+      });
+    } else if (Object.keys(upd).length) gd.__blAgain = true;
+  }
+  // pixel helpers
+  function geom(gd, ev) {
+    var r = gd.getBoundingClientRect(), fl = gd._fullLayout, xa = fl.xaxis;
+    return {px: ev.clientX - r.left - xa._offset, py: ev.clientY - r.top, xa: xa,
+            top: fl._size.t - 22, bot: fl._size.t + fl._size.h, len: xa._length};
+  }
+  function nearest(gd, ev) {
+    if (!ok(gd)) return null;
+    var g = geom(gd, ev);
+    if (g.py < g.top || g.py > g.bot || g.px < -GRAB || g.px > g.len + GRAB) return null;
+    var mem = memOf(gd), best = null, bd = GRAB + 1;
+    cursorShapes(gd).forEach(function (c) {
+      var x = mem[c[1].name] !== undefined ? mem[c[1].name] : +c[1].x0, d = Math.abs(g.xa.l2p(x) - g.px);
+      if (d < bd) { bd = d; best = c[1].name; }
+    });
+    return best;
+  }
+  var drag = null;
+  function moveTo(gd, name, ev) {
+    var g = geom(gd, ev), D = data(gd);
+    var x = g.xa.p2l(Math.min(g.len, Math.max(0, g.px)));
+    memOf(gd)[name] = Math.min(D.hi, Math.max(D.lo, x));
+    if (!gd.__blRaf) gd.__blRaf = requestAnimationFrame(function () { gd.__blRaf = 0; sync(gd); });
+  }
+  function attach(gd) {
+    var host = gd._ev || gd;            // Plotly drops all listeners (and _ev) when it re-creates a plot
+    if (!host.__blCursors && gd.on) {
+      host.__blCursors = true;
+      gd.on('plotly_afterplot', function () { if (!drag) sync(gd); });
+      gd.on('plotly_click', function (e) {   // click on the plot: move the nearest marker there
+        if (!e || !e.points || !e.points.length || !fin(+e.points[0].x) || !ok(gd)) return;
+        var x = +e.points[0].x, mem = memOf(gd), best = null, bd = Infinity;
+        cursorShapes(gd).forEach(function (c) { var v = mem[c[1].name] !== undefined ? mem[c[1].name] : +c[1].x0;
+                                                if (Math.abs(v - x) < bd) { bd = Math.abs(v - x); best = c[1].name; } });
+        if (best) { mem[best] = x; sync(gd); }
+      });
+    }
+    if (!gd.__blDom) {                  // DOM listeners survive a Plotly re-plot of the same div
+      gd.__blDom = true;
+      gd.addEventListener('mousedown', function (ev) {
+        if (ev.button !== 0) return;
+        var name = nearest(gd, ev);
+        if (!name) return;
+        ev.stopPropagation(); ev.preventDefault();      // keep Plotly from starting a zoom box
+        drag = {gd: gd, name: name};
+        document.body.classList.add('bl-cur-drag');
+        if (window.Plotly.Fx) window.Plotly.Fx.unhover(gd);
+        moveTo(gd, name, ev);
+      }, true);
+      gd.addEventListener('mousemove', function (ev) {
+        if (drag) return;
+        gd.classList.toggle('bl-cur-near', !!nearest(gd, ev));
+      });
+      gd.addEventListener('mouseleave', function () { gd.classList.remove('bl-cur-near'); });
     }
   }
-  function attach() {
+  window.addEventListener('mousemove', function (ev) {
+    if (!drag) return;
+    ev.preventDefault(); ev.stopPropagation();
+    moveTo(drag.gd, drag.name, ev);
+  }, true);
+  window.addEventListener('mouseup', function (ev) {
+    if (!drag) return;
+    ev.stopPropagation();
+    var d = drag; drag = null;
+    document.body.classList.remove('bl-cur-drag');
+    moveTo(d.gd, d.name, ev);
+  }, true);
+  setInterval(function () {
     if (!window.Plotly) return;
     document.querySelectorAll('.st-key-profchart .js-plotly-plot').forEach(function (gd) {
-      var host = gd._ev || gd;        // Plotly drops all listeners (and _ev) when it re-creates a plot
-      if (!host.__blCursors && gd.on) {
-        host.__blCursors = true;
-        gd.on('plotly_relayout', function (ev) { if (!gd.__blBusy) sync(gd, ev); });
-        gd.on('plotly_afterplot', function () { if (!gd.__blBusy) sync(gd); });
-        gd.on('plotly_click', function (e) { if (e && e.points && e.points.length && fin(+e.points[0].x)) sync(gd, null, +e.points[0].x); });
-      }
-      if (!gd.__blBusy) sync(gd);
+      attach(gd);
+      if (!drag && !gd.__blBusy) sync(gd);
     });
-  }
-  setInterval(attach, 400);
+  }, 400);
 })();
 </script>"""
 
@@ -974,7 +1031,7 @@ with main:
                 ncur = 0 if ss.ncur == "Off" else int(ss.ncur)
                 with st.container(key="profchart"):
                     st.plotly_chart(profile_figure(min(max(H - 320, 360), 560), ncur), width="stretch",
-                                    config={"displaylogo": False, "edits": {"shapePosition": True},
+                                    config={"displaylogo": False,
                                             "toImageButtonOptions": {"filename": f"{scan.title}_profile",
                                                                      "scale": 3}})
                 if ncur:

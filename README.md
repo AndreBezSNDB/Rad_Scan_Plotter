@@ -65,7 +65,7 @@ the stage between the two scans (or use Auto-align if you had to).
 
 The *Beamwidth and Signal Strength vs depth* plot has up to two draggable markers (Off / 1 / 2 above the
 plot). Drag a dashed line, or click the plot to move the nearest marker there. The readout under the plot
-gives depth, beamwidth and on-axis signal at each marker (interpolated) and the differences ② − ①; it is
+gives depth, beamwidth and on-axis signal at each marker (interpolated) and the differences ② − ①, updating live while you drag; it is
 included when you save the plot with the camera icon. Positions are kept per scan while the page is open.
 
 ## Notes
