@@ -9,6 +9,7 @@ beamlab-web/
 ├── app.py                 Streamlit user interface
 ├── beamcore.py            analysis (no UI) – same maths as the desktop viewer
 ├── store.py               per-user library + saved views on the server's disk
+├── merge.py               merge a coarse survey with a fine detail scan
 ├── requirements.txt
 ├── Dockerfile
 └── .streamlit/
@@ -50,6 +51,15 @@ on a trusted network.
 
 Each signed-in person gets their own library and saved views, stored under
 `/data/<email>/`.
+
+## Merging a coarse and a fine scan
+
+**Merge scans…** (top bar) combines e.g. a 0.2 mm survey with a 0.05 mm box around the focus.
+The detail scan is placed with the absolute stage positions saved in each file (`coords`), so it is
+correct even if the fine scan was re-centred or a different start distance was typed. The dialog
+reports the amplitude ratio and overlap residual before you commit; the merged scan is saved as a new
+library entry (the originals are untouched) and the fine region is outlined on the map. Don't re-home
+the stage between the two scans (or use Auto-align if you had to).
 
 ## Notes
 

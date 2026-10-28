@@ -21,8 +21,9 @@ from plotly.subplots import make_subplots
 from beamcore import (AXIS_NAMES, Scan, Settings, Unit, UPSCALE_STEPS, autofit, colour_bounds, compute,
                       profile_csv, render_png)
 from store import UserStore
+import merge as mg
 
-APP_VERSION = "2026-10-27 build 8"     # shown in the sidebar so you can confirm what is deployed
+APP_VERSION = "2026-10-28 build 9"     # shown in the sidebar so you can confirm what is deployed
 
 st.set_page_config(page_title="Beam Lab", page_icon="〰️", layout="wide", initial_sidebar_state="expanded")
 
@@ -341,10 +342,14 @@ with st.sidebar:
     lib = [e for e in store.scans if q in f"{e['name']} {e.get('filename', '')}".lower()]
     if not lib:
         st.caption("No matches" if q else "None yet — drop .mat files above")
+    names = [e["name"] for e in lib]
     for e in lib:
         c1, c2 = st.columns([6, 1], vertical_alignment="center")
         active = e["id"] == ss.scan_id
-        c1.button(f"{'▣' if active else '▤'}  {e['name']}", key=f"s_{e['id']}", on_click=cb_select,
+        shown = e["name"]
+        if names.count(e["name"]) > 1:                    # same device name twice: add the file name
+            shown += f" · {os.path.splitext(e.get('filename', ''))[0][:22]}"
+        c1.button(f"{'▣' if active else '▤'}  {shown}", key=f"s_{e['id']}", on_click=cb_select,
                   args=(e["id"],), type="secondary" if active else "tertiary", use_container_width=True,
                   help=f"{e.get('filename', '')} · {e.get('plane', '')} · added {e.get('added', '')}")
         with c2.popover("⋯", type="tertiary"):
@@ -533,6 +538,9 @@ clim = ss.get(ck, (c_lo, c_hi))
 user_up = s.upscale
 cells = len(scan.h) * len(scan.v)
 cap = max([f for f in UPSCALE_STEPS if cells * f * f <= MAP_CELLS_MAX] or [1])
+meas_cap = max([f for f in UPSCALE_STEPS if cells * f * f <= 1_500_000] or [1])   # memory guard for big grids
+if s.upscale > meas_cap:
+    s = Settings.from_dict({**s.as_dict(), "upscale": meas_cap})
 r = cached_compute(*SKEY, sjson(s), min(user_up, cap))     # measure on full upscale, display capped
 if r is None:
     with main:
@@ -576,6 +584,10 @@ def map_figure(plot_h: int):
                                      marker=dict(symbol="line-ns", size=12, line=dict(width=2, color=C["red"])),
                                      line=dict(color=C["red"], width=4),
                                      hovertemplate=f"{r.lvl} width {r.width:.3f} mm<extra></extra>"))
+    if scan.detail_box:                                   # merged scan: outline the fine-data region
+        bx = scan.detail_box
+        fig.add_shape(type="rect", x0=bx[0], x1=bx[1], y0=bx[2], y1=bx[3], xref="x", yref="y",
+                      line=dict(color="rgba(255,255,255,.75)", width=1, dash="dot"))
     if tg["target"]:
         fig.add_trace(go.Scatter(x=[r.fh], y=[r.fv], mode="markers",
                                  marker=dict(symbol="circle-cross-open", size=16, line=dict(width=2, color=C["org"])),
@@ -657,12 +669,68 @@ def export_png() -> bytes:
     return render_png(scan, s, rf, {**tg, "top": True}, ss[K(sid, "cmap")], clim, dark=dark, profile=tg["profile"])
 
 
+# ============================================================================ merge dialog
+@st.dialog("Merge scans", width="large")
+def merge_dialog():
+    lib = [e for e in store.scans if store.scan_path(e["id"]).exists()]
+    if len(lib) < 2:
+        st.info("Import at least two scans of the same plane first (a coarse survey and a fine detail scan).")
+        return
+    ids = [e["id"] for e in lib]
+    label = {e["id"]: f"{e['name']} · {e.get('plane', '')} · {e.get('filename', '')}" for e in lib}
+    st.caption("Combines a coarse survey with a fine scan of a small region (e.g. 0.2 mm overall + 0.05 mm "
+               "around the focus). The result is saved to your library as a new scan; the originals are untouched.")
+    a, b = st.columns(2)
+    base_id = a.selectbox("Base scan (coarse, whole beam)", ids, index=ids.index(sid) if sid in ids else 0,
+                          format_func=lambda i: label[i])
+    det_opts = [i for i in ids if i != base_id]
+    det_id = b.selectbox("Detail scan (fine, small region)", det_opts, format_func=lambda i: label[i])
+    align = st.radio("Position the detail scan using", [mg.ALIGN_STAGE, mg.ALIGN_AUTO, mg.ALIGN_SCAN],
+                     help="Stage coordinates (recommended): absolute stage positions saved in each file — correct "
+                          "even if the fine scan was re-centred or a different start distance was typed. "
+                          "Auto-align: starts from stage coordinates and refines the offset by matching the overlap "
+                          "(use if the stage was re-homed; accurate to ~0.02 mm). Scan coordinates: PDx/PDy/PDz as "
+                          "written — only correct if both scans share the same centre and start distance.")
+    with st.expander("Advanced"):
+        c1, c2, c3 = st.columns(3)
+        base = get_scan(base_id)
+        xh = c1.number_input(f"Extra {base.hname} offset (mm)", value=0.0, step=0.01, format="%.3f")
+        xv = c2.number_input(f"Extra {base.vname} offset (mm)", value=0.0, step=0.01, format="%.3f")
+        feather = c3.slider("Blend width (coarse steps)", 0.0, 4.0, 2.0, 0.5,
+                            help="Width of the cosine blend just inside the fine box, to avoid a seam.")
+        match = st.toggle("Scale the detail scan to match the base amplitude in the overlap", value=True)
+    base, det = get_scan(base_id), get_scan(det_id)
+    try:
+        merged, rep = mg.merge_scans(base, det, align=align, extra_h=xh, extra_v=xv,
+                                     match_amplitude=match, feather_steps=feather)
+    except ValueError as e:
+        st.error(str(e))
+        return
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Offset applied", f"{rep.offset_h:+.3f} / {rep.offset_v:+.3f}", help=f"{base.hname} / {base.vname} (mm)")
+    m2.metric("Amplitude ratio", f"{rep.scale:.3f}", help="Base ÷ detail over the overlap; ~1.00 expected.")
+    m3.metric("Overlap residual", f"{rep.residual_pct:.1f} %",
+              help="RMS difference between the scans where they overlap, as % of peak. Includes noise and the "
+                   "coarse scan's own interpolation error; under ~2–3 % is a good match.")
+    m4.metric("Merged grid", f"{rep.shape[1]} × {rep.shape[0]}", help=f"{rep.step_h:g} × {rep.step_v:g} mm spacing")
+    for w in rep.warnings:
+        st.warning(w)
+    if not rep.warnings:
+        st.success("The scans agree well in the overlap.")
+    if st.button("Create merged scan", type="primary", use_container_width=True):
+        e = store.add_scan(mg.scan_to_mat_bytes(merged), f"{base.title}_merged_{det.dh:g}mm.mat")
+        cb_select(e["id"])
+        st.rerun()
+
+
 # ============================================================================ main column
 with main:
     # top bar
     top_l, top_r = st.columns([2, 3], vertical_alignment="center")
     top_l.markdown(f"<div class='bl-crumb'>Scans / {scan.title}</div>", unsafe_allow_html=True)
     with top_r.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center"):
+        if st.button("Merge scans…", type="tertiary"):
+            merge_dialog()
         with st.popover("Save view", type="tertiary"):
             st.text_input("View name", key="new_view_name", placeholder=f"{scan.title} – elevation focus")
             st.button("Save", type="primary", on_click=cb_save_view, args=(sid,), use_container_width=True)

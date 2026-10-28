@@ -91,6 +91,11 @@ class Scan:
     sens: float = 1.0
     gain: float = 0.0
     navg: Optional[int] = None
+    h_stage: Optional[np.ndarray] = None     # absolute stage positions matching h / v (from "coords"), if saved
+    v_stage: Optional[np.ndarray] = None
+    fixed_stage: Optional[float] = None
+    merge_info: str = ""                     # set on merged scans
+    detail_box: Optional[tuple] = None       # (h0, h1, v0, v1) of the fine-scan region on merged scans
 
     @classmethod
     def load(cls, src, name: str = "") -> "Scan":
@@ -120,7 +125,21 @@ class Scan:
                 return None
             return np.take(a, 0, axis=fixed).T[np.ix_(ov, oh)]
 
+        stage = [None, None, None]
+        c = d.get("coords")
+        if c is not None and np.asarray(c).size == 3:
+            c = np.asarray(c, dtype=object).ravel()
+            for i in range(3):
+                a = np.asarray(c[i], float).ravel()
+                if a.size == shape[i]:
+                    stage[i] = a
+        db = np.asarray(d["DetailBox"], float).ravel() if "DetailBox" in d else np.array([])
         return cls(name=name or (isinstance(src, str) and os.path.basename(src)) or "scan.mat",
+                   h_stage=None if stage[h_ax] is None else stage[h_ax][oh],
+                   v_stage=None if stage[v_ax] is None else stage[v_ax][ov],
+                   fixed_stage=None if stage[fixed] is None else float(stage[fixed][0]),
+                   merge_info=str(_scalar(d, "MergeInfo", "") or ""),
+                   detail_box=tuple(float(x) for x in db) if db.size == 4 else None,
                    h=pos[h_ax][oh], v=pos[v_ax][ov], h_ax=h_ax, v_ax=v_ax, fixed_ax=fixed,
                    fixed_val=float(pos[fixed][0]), vpp=plane("VPPDatastore"), vmax=plane("VMAXDatastore"),
                    vmin=plane("VMINDatastore"), device=str(_scalar(d, "DeviceID", "") or ""),
@@ -268,6 +287,27 @@ def axial_profile(h, v, lin, x0, x1, n=400):
     hs = x0 + (x1 - x0) * (vs - v[0]) / (v[-1] - v[0]) if v[-1] != v[0] else np.full(n, x0)
     f = RegularGridInterpolator((v, h), lin, bounds_error=False, fill_value=np.nan)
     return vs, hs, f(np.c_[vs, hs])
+
+
+def focal_depth_fit(z, p, top_db=-1.0):
+    """Depth of the axial maximum: parabola vertex over the contiguous region within top_db of the peak."""
+    ok = np.isfinite(p)
+    if ok.sum() < 3:
+        return float(z[int(np.nanargmax(p))]) if ok.any() else float(z[len(z) // 2])
+    k = int(np.nanargmax(p))
+    thr = p[k] * 10 ** (top_db / 20)
+    i0 = k
+    while i0 > 0 and ok[i0 - 1] and p[i0 - 1] >= thr:
+        i0 -= 1
+    i1 = k
+    while i1 < len(p) - 1 and ok[i1 + 1] and p[i1 + 1] >= thr:
+        i1 += 1
+    if i1 - i0 < 2:
+        return float(z[k])
+    a, b_, _ = np.polyfit(z[i0:i1 + 1], p[i0:i1 + 1], 2)
+    if a >= 0:
+        return float(z[k])
+    return float(np.clip(-b_ / (2 * a), z[i0], z[i1]))
 
 
 def depth_widths(h, lin, frac):
@@ -425,15 +465,24 @@ def compute(scan: Scan, st: Settings, display_up: Optional[int] = None) -> Optio
     level = st.level_db if st.level_db < 0 else -3.0
     frac, lvl = 10 ** (level / 20), f"{level:g} dB"
     hn = f"{scan.hname}′" if st.deskew else scan.hname
-    iv, ih = np.unravel_index(np.nanargmax(lin), lin.shape)
-    fh, fv, fval = float(h[ih]), float(v[iv]), float(lin[iv, ih])
+    # Focal depth: vertex of a parabola fitted to the on-axis signal within -1 dB of its peak. In a
+    # flat-topped focal zone the single highest sample is decided by noise; the fit uses all points near
+    # the top. Lateral focus = peak of that depth's row; the reported value is the measured sample there.
+    ax_x = (0.0, 0.0) if st.deskew else (float(st.axis_h(v[0])), float(st.axis_h(v[-1])))
+    if lin.shape[0] >= 3 and lin.shape[1] >= 2:
+        _, _, on = axial_profile(h, v, lin, *ax_x, n=len(v))
+        fv = focal_depth_fit(v, on)
+    else:
+        fv = float(v[int(np.nanargmax(np.nanmax(lin, axis=1)))])
+    iv = int(np.abs(v - fv).argmin())
+    ih = int(np.nanargmax(lin[iv, :]))
+    fh, fval = float(h[ih]), float(lin[iv, ih])
     fval_mpa = fval * 1e-3 / st.volts_per_mpa if unit == "mV" else (fval if st.unit == Unit.PPP else None)
     # focal width on the measurement grid: the row nearest the focal depth, around its own peak
     iu = int(np.abs(mv - fv).argmin())
     row = mlin[iu, :]
     ju = int(np.nanargmax(row)) if not np.all(np.isnan(row)) else ih
     wa, wb = crossings(mh, row, ju, frac)
-    ax_x = (0.0, 0.0) if st.deskew else (float(st.axis_h(v[0])), float(st.axis_h(v[-1])))
 
     depth, widths = None, np.full(len(mv), np.nan)
     amp, alab = np.full(len(mv), np.nan), "On-axis signal"
@@ -478,6 +527,9 @@ def compute(scan: Scan, st: Settings, display_up: Optional[int] = None) -> Optio
                            f"({depth['za_']:.2f} → {depth['zb_']:.2f})")
     r.lines.append(f"Axis tilt: {st.tilt_deg:+.2f}° ({np.tan(np.radians(st.tilt_deg)) * 1e3:+.1f} µm/mm)"
                    + (" · deskewed" if st.deskew else ""))
+    if s.detail_box:
+        bx = s.detail_box
+        r.lines.append(f"Fine {s.dh:g} mm box: {s.hname} {bx[0]:.2f}…{bx[1]:.2f}, {s.vname} {bx[2]:.2f}…{bx[3]:.2f}")
     r.lines.append(f"Grid: {s.plane} at {AXIS_NAMES[s.fixed_ax]} = {s.fixed_val:.2f} mm"
                    + (f" · widths on {meas_up}× grid" if meas_up > 1 else ""))
     return r

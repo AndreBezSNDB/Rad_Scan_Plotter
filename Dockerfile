@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py beamcore.py store.py ./
+COPY app.py beamcore.py store.py merge.py ./
 COPY .streamlit/config.toml .streamlit/config.toml
 # secrets.toml (sign-in settings) is NOT baked in - mount it or set it in the host's secret store:
 #   -v /path/to/secrets.toml:/app/.streamlit/secrets.toml:ro
